@@ -89,3 +89,49 @@ impl ContextStore {
         self.inner.remove(handle_id).is_some()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn global_store_insert_and_get_round_trip() {
+        global_store_insert("h_test".to_string(), json!({"x": 1}));
+        let got = global_store_get("h_test");
+        assert_eq!(got, Some(json!({"x": 1})));
+    }
+
+    #[test]
+    fn context_store_basic_operations() {
+        let store = ContextStore::new();
+        assert_eq!(store.len(), 0);
+        assert!(store.is_empty());
+
+        store
+            .insert("h1", r#"{"value": 42}"#)
+            .expect("insert should succeed");
+        assert_eq!(store.len(), 1);
+        assert!(!store.is_empty());
+
+        let payload = store
+            .get("h1")
+            .expect("get should not fail")
+            .expect("value should exist");
+        assert_eq!(payload, r#"{"value":42}"#);
+
+        assert!(store.remove("h1"));
+        assert_eq!(store.len(), 0);
+        assert!(!store.remove("h1"));
+    }
+
+    #[test]
+    fn context_store_clear_empties_entries() {
+        let store = ContextStore::new();
+        store.insert("a", r#"{"a":1}"#).expect("insert should succeed");
+        store.insert("b", r#"{"b":2}"#).expect("insert should succeed");
+        assert_eq!(store.len(), 2);
+        store.clear();
+        assert_eq!(store.len(), 0);
+    }
+}

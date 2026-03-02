@@ -192,3 +192,65 @@ pub fn query_json_path(value: &Value, json_path: &str) -> PyResult<String> {
     )
     .map_err(|e| PyValueError::new_err(format!("failed to serialize query results: {e}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pyo3::Python;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn normalize_json_path_supports_dot_index_notation() {
+        let normalized = normalize_json_path("contributors.0.login").expect("path should normalize");
+        assert_eq!(normalized, "$.contributors[0].login");
+    }
+
+    #[test]
+    fn normalize_json_path_rejects_empty_paths() {
+        Python::initialize();
+        let err = normalize_json_path("   ").expect_err("empty path should fail");
+        assert!(err.to_string().contains("json path must not be empty"));
+    }
+
+    #[test]
+    fn teaser_includes_object_keys_and_array_shape() {
+        let payload = json!({
+            "contributors": [
+                {"login": "octocat", "id": 1},
+                {"login": "hubot", "id": 2}
+            ],
+            "meta": {"total": 2}
+        });
+        let teaser: Value = serde_json::from_str(&generate_teaser_from_value(&payload))
+            .expect("teaser should be valid json");
+
+        assert_eq!(teaser["_teaser"], json!(true));
+        assert_eq!(teaser["_type"], json!("object"));
+        assert!(teaser["keys"]
+            .as_array()
+            .expect("keys must be array")
+            .contains(&json!("contributors")));
+        assert_eq!(teaser["structure"]["contributors"]["_type"], json!("Array[2]"));
+    }
+
+    #[test]
+    fn query_json_path_returns_null_for_no_matches() {
+        let payload = json!({"items": [1, 2, 3]});
+        let out = query_json_path(&payload, "$.missing").expect("query should succeed");
+        assert_eq!(out, "null");
+    }
+
+    #[test]
+    fn query_json_path_returns_scalar_for_single_match() {
+        let payload = json!({"items": [{"login": "octocat"}]});
+        let out = query_json_path(&payload, "items.0.login").expect("query should succeed");
+        assert_eq!(out, "\"octocat\"");
+    }
+
+    #[test]
+    fn query_json_path_returns_array_for_multiple_matches() {
+        let payload = json!({"items": [1, 2, 3]});
+        let out = query_json_path(&payload, "$.items[*]").expect("query should succeed");
+        assert_eq!(out, "[1,2,3]");
+    }
+}

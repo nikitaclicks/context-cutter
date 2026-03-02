@@ -16,3 +16,7 @@ redis = ["redis>=5.0"]
 [tool.maturin]
 python-source = "python"
 module-name = "context_cutter._lib"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

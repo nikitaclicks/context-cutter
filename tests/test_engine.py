@@ -22,13 +22,33 @@ def isolated_default_store() -> None:
     set_default_store(InMemoryStore())
 
 
-def test_store_response_returns_unique_handle_ids() -> None:
-    h1 = store_response('{"a": 1}')
-    h2 = store_response('{"a": 2}')
+def test_store_response_is_deterministic_for_same_payload() -> None:
+    h1 = store_response('{"a": 1, "b": {"x": 2, "y": 3}}')
+    h2 = store_response('{"b": {"y": 3, "x": 2}, "a": 1}')
 
     assert isinstance(h1, str) and h1.startswith("hdl_")
     assert isinstance(h2, str) and h2.startswith("hdl_")
+    assert h1 == h2
+
+
+def test_store_response_differs_for_different_payloads() -> None:
+    h1 = store_response('{"a": 1}')
+    h2 = store_response('{"a": 2}')
     assert h1 != h2
+
+
+def test_store_response_custom_store_is_deterministic() -> None:
+    store = InMemoryStore()
+    h1 = store_response({"a": 1, "b": {"x": 2, "y": 3}}, store=store)
+    h2 = store_response({"b": {"y": 3, "x": 2}, "a": 1}, store=store)
+    assert h1 == h2
+
+
+def test_store_response_rust_and_custom_store_match_contract() -> None:
+    payload = {"a": 1, "b": {"x": 2, "y": 3}}
+    rust_handle = store_response(payload)
+    custom_handle = store_response(payload, store=InMemoryStore())
+    assert rust_handle == custom_handle
 
 
 def test_store_response_rejects_invalid_json() -> None:

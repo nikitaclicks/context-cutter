@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from typing import Any
 
 from ._lib import (
@@ -22,6 +23,12 @@ def _normalize_payload(payload: str | Any) -> Any:
     return payload
 
 
+def _deterministic_handle_id(payload: Any) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    digest = sha256(canonical.encode("utf-8")).hexdigest()
+    return f"hdl_{digest[:12]}"
+
+
 def store_response(payload: str | Any, *, store: BaseStore | None = None) -> str:
     """Store JSON payload and return handle ID.
 
@@ -31,9 +38,7 @@ def store_response(payload: str | Any, *, store: BaseStore | None = None) -> str
     if store is None:
         return _rust_store_response(json.dumps(normalized))
     selected_store = store
-    from uuid import uuid4
-
-    handle_id = f"hdl_{uuid4().hex[:12]}"
+    handle_id = _deterministic_handle_id(normalized)
     selected_store.set(handle_id, normalized)
     return handle_id
 
