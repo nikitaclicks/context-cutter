@@ -7,12 +7,6 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
-class HandleRef(BaseModel):
-    """Reference to a stored payload."""
-
-    handle_id: str = Field(min_length=1)
-
-
 class LazyHandleResponse(BaseModel):
     """Return shape from lazy interception."""
 
@@ -25,11 +19,3 @@ class QueryRequest(BaseModel):
 
     handle_id: str = Field(min_length=1)
     json_path: str = Field(min_length=1)
-
-
-class QueryResult(BaseModel):
-    """Structured query response for tool-facing APIs."""
-
-    handle_id: str = Field(min_length=1)
-    json_path: str = Field(min_length=1)
-    result: Any

@@ -34,6 +34,12 @@ pub struct ContextStore {
     inner: DashMap<String, Value>,
 }
 
+impl Default for ContextStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[pymethods]
 impl ContextStore {
     /// Creates a new empty in-memory context store.
@@ -66,6 +72,11 @@ impl ContextStore {
     /// Returns the number of stored entries.
     pub fn len(&self) -> usize {
         self.inner.len()
+    }
+
+    /// Returns true when the store contains no entries.
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
     }
 
     /// Clears all entries in the store.
