@@ -1,0 +1,24 @@
+{
+  "service": "billing",
+  "regions": [
+    {
+      "name": "us-east-1",
+      "stats": {
+        "p50_ms": 24.2,
+        "p95_ms": 80.1,
+        "errors": 2
+      }
+    },
+    {
+      "name": "eu-west-1",
+      "stats": {
+        "p50_ms": 27.4,
+        "p95_ms": 96.7,
+        "errors": 5
+      }
+    }
+  ],
+  "window": {
+    "minutes": 15
+  }
+}

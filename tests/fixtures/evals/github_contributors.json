@@ -1,0 +1,20 @@
+{
+  "contributors": [
+    {
+      "id": 1,
+      "login": "octocat",
+      "contributions": 500,
+      "active": true
+    },
+    {
+      "id": 2,
+      "login": "hubot",
+      "contributions": 123,
+      "active": false
+    }
+  ],
+  "meta": {
+    "total": 2,
+    "source": "github"
+  }
+}

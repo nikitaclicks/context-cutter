@@ -142,3 +142,10 @@ Includes `query_handle` and a backward-compatible alias entry.
 source .venv/bin/activate
 pytest -q
 ```
+
+Run benchmarks:
+
+```bash
+source .venv/bin/activate
+pytest -m benchmark --benchmark-json benchmark.json
+```

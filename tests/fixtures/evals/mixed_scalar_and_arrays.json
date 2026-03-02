@@ -1,0 +1,12 @@
+{
+  "flags": {
+    "enabled": true,
+    "beta": false
+  },
+  "tags": ["alpha", "beta", "gamma"],
+  "counts": [1, 3, 5, 7],
+  "owner": {
+    "name": "team-core",
+    "size": 8
+  }
+}
