@@ -15,7 +15,7 @@ pub use store::ContextStore;
 fn store_response(json_str: &str) -> PyResult<String> {
     let value: Value = serde_json::from_str(json_str)
         .map_err(|e| PyValueError::new_err(format!("invalid JSON payload: {e}")))?;
-    let handle_id = Uuid::new_v4().to_string();
+    let handle_id = format!("hdl_{}", &Uuid::new_v4().simple().to_string()[..12]);
     store::global_store_insert(handle_id.clone(), value);
     Ok(handle_id)
 }

@@ -7,10 +7,11 @@ name = "context-cutter"
 version = "0.1.0"
 description = "LLM tool-calling utility that solves JSON Bloat"
 requires-python = ">=3.9"
-dependencies = []
+dependencies = ["pydantic>=2.0", "jsonpath-ng>=1.6"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pydantic>=2.0"]
+dev = ["pytest>=8.0"]
+redis = ["redis>=5.0"]
 
 [tool.maturin]
 python-source = "python"

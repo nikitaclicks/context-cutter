@@ -1,4 +1,4 @@
-"""Tests for Rust core bindings."""
+"""Tests for core handle-and-path engine."""
 
 from __future__ import annotations
 
@@ -6,15 +6,28 @@ import json
 
 import pytest
 
-from context_cutter._lib import ContextStore, generate_teaser, query_path, store_response
+from context_cutter import (
+    ContextStore,
+    InMemoryStore,
+    generate_teaser,
+    query_handle,
+    query_path,
+    set_default_store,
+    store_response,
+)
+
+
+@pytest.fixture(autouse=True)
+def isolated_default_store() -> None:
+    set_default_store(InMemoryStore())
 
 
 def test_store_response_returns_unique_handle_ids() -> None:
     h1 = store_response('{"a": 1}')
     h2 = store_response('{"a": 2}')
 
-    assert isinstance(h1, str) and h1
-    assert isinstance(h2, str) and h2
+    assert isinstance(h1, str) and h1.startswith("hdl_")
+    assert isinstance(h2, str) and h2.startswith("hdl_")
     assert h1 != h2
 
 
@@ -23,14 +36,25 @@ def test_store_response_rejects_invalid_json() -> None:
         store_response("{not valid json}")
 
 
-def test_generate_teaser_returns_stub_json() -> None:
-    handle = store_response('{"nested": {"ok": true}}')
-    teaser = generate_teaser(handle)
-    parsed = json.loads(teaser)
+def test_generate_teaser_returns_real_structure_map() -> None:
+    handle = store_response(
+        json.dumps(
+            {
+                "contributors": [
+                    {"login": "octocat", "contributions": 500, "id": 1},
+                    {"login": "hubot", "contributions": 123, "id": 2},
+                ],
+                "meta": {"total": 2},
+            }
+        )
+    )
+    teaser = json.loads(generate_teaser(handle))
 
-    assert parsed["_teaser"] is True
-    assert parsed["_type"] == "object"
-    assert "stub" in parsed["_keys"]
+    assert teaser["_teaser"] is True
+    assert teaser["_type"] == "object"
+    assert "contributors" in teaser["keys"]
+    assert teaser["structure"]["contributors"]["_type"] == "Array[2]"
+    assert "login" in teaser["structure"]["contributors"]["item_keys"]
 
 
 def test_generate_teaser_unknown_handle_raises_key_error() -> None:
@@ -38,10 +62,16 @@ def test_generate_teaser_unknown_handle_raises_key_error() -> None:
         generate_teaser("missing-handle")
 
 
-def test_query_path_returns_stub_result() -> None:
+def test_query_path_returns_actual_json_result() -> None:
     handle = store_response('{"items": [1, 2, 3]}')
     result = query_path(handle, "$.items[*]")
-    assert result == '["stub_result"]'
+    assert json.loads(result) == [1, 2, 3]
+
+
+def test_query_handle_supports_dot_notation() -> None:
+    handle = store_response('{"contributors":[{"login":"octocat","contributions":500}]}')
+    result = query_handle(handle, "contributors.0.login")
+    assert result == "octocat"
 
 
 def test_query_path_unknown_handle_raises_key_error() -> None:
