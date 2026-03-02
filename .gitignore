@@ -1,0 +1,18 @@
+# Rust
+/target/
+Cargo.lock
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+
+# Native extension outputs
+*.so
+*.pyd
+*.dylib
+*.dSYM/
