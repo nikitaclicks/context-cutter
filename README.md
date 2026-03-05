@@ -149,3 +149,29 @@ Run benchmarks:
 source .venv/bin/activate
 pytest -m benchmark --benchmark-json benchmark.json
 ```
+
+Run deterministic AI e2e tests (local/manual):
+
+```bash
+source .venv/bin/activate
+pytest -m ai_e2e_offline -q
+```
+
+Run live AI e2e smoke (optional; requires API key):
+
+```bash
+source .venv/bin/activate
+CONTEXT_CUTTER_LIVE_PROVIDER=openai OPENAI_API_KEY=... CONTEXT_CUTTER_OPENAI_MODEL=gpt-4.1-mini pytest -m ai_e2e_live -q
+```
+
+Run live AI e2e smoke with Gemini (optional; requires API key):
+
+```bash
+source .venv/bin/activate
+CONTEXT_CUTTER_LIVE_PROVIDER=gemini GEMINI_API_KEY=... CONTEXT_CUTTER_GEMINI_MODEL=gemini-1.5-pro pytest -m ai_e2e_live -q
+```
+
+CI notes:
+
+- Default PR/push workflow excludes AI e2e markers.
+- Full AI e2e execution is available via manual workflow dispatch in `.github/workflows/ai-e2e.yml` (provider selectable: `openai` or `gemini`).

@@ -20,4 +20,8 @@ module-name = "context_cutter._lib"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
-markers = ["benchmark: performance benchmark tests"]
+markers = [
+	"benchmark: performance benchmark tests",
+	"ai_e2e_offline: deterministic, provider-agnostic AI-integrated end-to-end tests",
+	"ai_e2e_live: optional live provider smoke tests requiring network and API keys",
+]

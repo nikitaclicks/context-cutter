@@ -1,0 +1,73 @@
+name: AI E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_live:
+        description: "Run live provider smoke test"
+        required: true
+        default: false
+        type: boolean
+      provider:
+        description: "Live provider (openai|gemini)"
+        required: true
+        default: "openai"
+        type: string
+      openai_model:
+        description: "Model for OpenAI live smoke test"
+        required: false
+        default: "gpt-4.1-mini"
+        type: string
+      gemini_model:
+        description: "Model for Gemini live smoke test"
+        required: false
+        default: "gemini-1.5-pro"
+        type: string
+
+jobs:
+  offline-ai-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install project (dev)
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run offline AI e2e tests
+        run: pytest -m ai_e2e_offline -q
+
+  live-ai-e2e:
+    if: ${{ inputs.run_live }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install project (dev)
+        run: python -m pip install -e ".[dev]"
+
+      - name: Run live AI e2e smoke test
+        env:
+          CONTEXT_CUTTER_LIVE_PROVIDER: ${{ inputs.provider }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CONTEXT_CUTTER_OPENAI_MODEL: ${{ inputs.openai_model }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CONTEXT_CUTTER_GEMINI_MODEL: ${{ inputs.gemini_model }}
+        run: pytest -m ai_e2e_live -q
