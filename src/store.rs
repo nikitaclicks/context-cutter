@@ -5,8 +5,8 @@
 //! - A `ContextStore` class exposed to Python for explicit store instances.
 
 use std::collections::VecDeque;
-use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
@@ -324,8 +324,12 @@ mod tests {
     #[test]
     fn context_store_clear_empties_entries() {
         let store = ContextStore::new();
-        store.insert("a", r#"{"a":1}"#).expect("insert should succeed");
-        store.insert("b", r#"{"b":2}"#).expect("insert should succeed");
+        store
+            .insert("a", r#"{"a":1}"#)
+            .expect("insert should succeed");
+        store
+            .insert("b", r#"{"b":2}"#)
+            .expect("insert should succeed");
         assert_eq!(store.len(), 2);
         store.clear();
         assert_eq!(store.len(), 0);

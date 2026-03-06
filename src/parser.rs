@@ -68,7 +68,8 @@ fn summarize(value: &Value, depth: usize) -> Value {
         return match value {
             Value::Object(_) => Value::String("{...}".to_string()),
             Value::Array(arr) => Value::String(format!("Array[{}]", arr.len())),
-            _ => small_scalar(value).unwrap_or_else(|| Value::String(value_type_name(value).to_string())),
+            _ => small_scalar(value)
+                .unwrap_or_else(|| Value::String(value_type_name(value).to_string())),
         };
     }
 
@@ -104,7 +105,9 @@ fn summarize(value: &Value, depth: usize) -> Value {
                 })
             }
         }
-        _ => small_scalar(value).unwrap_or_else(|| Value::String(value_type_name(value).to_string())),
+        _ => {
+            small_scalar(value).unwrap_or_else(|| Value::String(value_type_name(value).to_string()))
+        }
     }
 }
 
@@ -199,13 +202,8 @@ pub fn query_json_path(value: &Value, json_path: &str) -> Result<String, Context
         return serde_json::to_string(matches[0])
             .map_err(|e| ContextCutterError::Serialize(e.to_string()));
     }
-    serde_json::to_string(
-        &matches
-            .into_iter()
-            .cloned()
-            .collect::<Vec<Value>>(),
-    )
-    .map_err(|e| ContextCutterError::Serialize(e.to_string()))
+    serde_json::to_string(&matches.into_iter().cloned().collect::<Vec<Value>>())
+        .map_err(|e| ContextCutterError::Serialize(e.to_string()))
 }
 
 #[cfg(test)]
@@ -215,7 +213,8 @@ mod tests {
 
     #[test]
     fn normalize_json_path_supports_dot_index_notation() {
-        let normalized = normalize_json_path("contributors.0.login").expect("path should normalize");
+        let normalized =
+            normalize_json_path("contributors.0.login").expect("path should normalize");
         assert_eq!(normalized, "$.contributors[0].login");
     }
 
@@ -243,7 +242,10 @@ mod tests {
             .as_array()
             .expect("keys must be array")
             .contains(&json!("contributors")));
-        assert_eq!(teaser["structure"]["contributors"]["_type"], json!("Array[2]"));
+        assert_eq!(
+            teaser["structure"]["contributors"]["_type"],
+            json!("Array[2]")
+        );
     }
 
     #[test]

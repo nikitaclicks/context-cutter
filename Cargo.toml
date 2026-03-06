@@ -34,5 +34,5 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"]
 # MCP server dependencies (used by the binary target, not required for Python lib).
 rmcp = { version = "1.1.0", features = ["server", "macros", "transport-io", "schemars"] }
 tokio = { version = "1", features = ["full"] }
-ureq = "3"
+ureq = "=2.12.1"
 schemars = "1"

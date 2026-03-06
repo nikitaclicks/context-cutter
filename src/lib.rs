@@ -4,10 +4,10 @@
 //! The PyO3 bindings below are compiled only when the `python` feature is enabled —
 //! Maturin passes `--features python` automatically via `pyproject.toml`.
 
+pub mod engine;
+pub mod error;
 mod parser;
 pub mod store;
-pub mod error;
-pub mod engine;
 
 // ─── PyO3 bindings ────────────────────────────────────────────────────────────
 #[cfg(feature = "python")]

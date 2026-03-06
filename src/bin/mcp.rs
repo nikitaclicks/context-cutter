@@ -9,15 +9,15 @@ use context_cutter::engine::{engine_query, engine_store, engine_teaser};
 use context_cutter::error::ContextCutterError;
 use context_cutter::store::start_background_sweeper;
 use rmcp::{
-    ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
+    ServerHandler, ServiceExt,
 };
 use serde::Deserialize;
-use std::io::Read;
 use std::collections::HashMap;
+use std::io::Read;
 use tracing::{error, info, instrument};
 use tracing_subscriber::EnvFilter;
 
@@ -95,7 +95,8 @@ fn read_response_with_limit(
         });
     }
 
-    String::from_utf8(buf).map_err(|e| ContextCutterError::RequestFailed(format!("non-utf8 body: {e}")))
+    String::from_utf8(buf)
+        .map_err(|e| ContextCutterError::RequestFailed(format!("non-utf8 body: {e}")))
 }
 
 fn init_tracing() {
@@ -174,89 +175,91 @@ impl ContextCutterServer {
     ) -> Result<String, String> {
         #[instrument(skip(params), fields(url = %params.url, method = ?params.method))]
         async fn inner(params: FetchParams) -> Result<String, ContextCutterError> {
-        validate_https_url(&params.url)?;
+            validate_https_url(&params.url)?;
 
-        let url = params.url.clone();
-        let method = params
-            .method
-            .clone()
-            .unwrap_or_else(|| "GET".to_string())
-            .to_uppercase();
-        if method.as_bytes().contains(&0) {
-            return Err(ContextCutterError::Validation(
-                "method must not contain null bytes".to_string(),
-            ));
-        }
-        let headers = params.headers.clone();
-        let body = params.body.clone();
-        let timeout = params.timeout_seconds.unwrap_or(45.0);
-        let max_bytes = max_payload_bytes();
+            let url = params.url.clone();
+            let method = params
+                .method
+                .clone()
+                .unwrap_or_else(|| "GET".to_string())
+                .to_uppercase();
+            if method.as_bytes().contains(&0) {
+                return Err(ContextCutterError::Validation(
+                    "method must not contain null bytes".to_string(),
+                ));
+            }
+            let headers = params.headers.clone();
+            let body = params.body.clone();
+            let timeout = params.timeout_seconds.unwrap_or(45.0);
+            let max_bytes = max_payload_bytes();
 
-        // ureq is synchronous — run it off the async executor.
-        let json_str = tokio::task::spawn_blocking(move || -> Result<String, ContextCutterError> {
-            let duration = std::time::Duration::from_secs_f64(timeout);
-            let agent = ureq::AgentBuilder::new().timeout(duration).build();
+            // ureq is synchronous — run it off the async executor.
+            let json_str =
+                tokio::task::spawn_blocking(move || -> Result<String, ContextCutterError> {
+                    let duration = std::time::Duration::from_secs_f64(timeout);
+                    let agent = ureq::AgentBuilder::new().timeout(duration).build();
 
-            let mut req = agent.request(&method, &url);
-            if let Some(ref hdrs) = headers {
-                for (k, v) in hdrs {
-                    if k.as_bytes().contains(&0) || v.as_bytes().contains(&0) {
-                        return Err(ContextCutterError::Validation(
-                            "headers must not contain null bytes".to_string(),
-                        ));
+                    let mut req = agent.request(&method, &url);
+                    if let Some(ref hdrs) = headers {
+                        for (k, v) in hdrs {
+                            if k.as_bytes().contains(&0) || v.as_bytes().contains(&0) {
+                                return Err(ContextCutterError::Validation(
+                                    "headers must not contain null bytes".to_string(),
+                                ));
+                            }
+                            req = req.set(k, v);
+                        }
                     }
-                    req = req.set(k, v);
-                }
-            }
 
-            // Pre-serialize body so the HTTP branches have the same return type.
-            let body_str: Option<String> = if let Some(ref b) = body {
-                Some(
-                    serde_json::to_string(b)
-                        .map_err(|e| ContextCutterError::Serialize(e.to_string()))?,
-                )
-            } else {
-                None
-            };
+                    // Pre-serialize body so the HTTP branches have the same return type.
+                    let body_str: Option<String> = if let Some(ref b) = body {
+                        Some(
+                            serde_json::to_string(b)
+                                .map_err(|e| ContextCutterError::Serialize(e.to_string()))?,
+                        )
+                    } else {
+                        None
+                    };
 
-            // Perform the HTTP call.
-            let call_result = if let Some(ref s) = body_str {
-                req.set("Content-Type", "application/json").send_string(s)
-            } else {
-                req.call()
-            };
+                    // Perform the HTTP call.
+                    let call_result = if let Some(ref s) = body_str {
+                        req.set("Content-Type", "application/json").send_string(s)
+                    } else {
+                        req.call()
+                    };
 
-            match call_result {
-                Ok(r) => read_response_with_limit(r, max_bytes),
-                // Non-2xx: still try to read the body — it may contain useful JSON.
-                Err(ureq::Error::Status(code, r)) => {
-                    info!(status = code, "received non-2xx response; attempting body parse");
-                    read_response_with_limit(r, max_bytes)
-                }
-                Err(e) => Err(ContextCutterError::RequestFailed(e.to_string())),
-            }
-        })
-        .await
-        .map_err(|e| ContextCutterError::Internal(format!("spawn_blocking panic: {e}")))?;
+                    match call_result {
+                        Ok(r) => read_response_with_limit(r, max_bytes),
+                        // Non-2xx: still try to read the body — it may contain useful JSON.
+                        Err(ureq::Error::Status(code, r)) => {
+                            info!(status = code, "received non-2xx response; attempting body parse");
+                            read_response_with_limit(r, max_bytes)
+                        }
+                        Err(e) => Err(ContextCutterError::RequestFailed(e.to_string())),
+                    }
+                })
+                .await
+                .map_err(|e| ContextCutterError::Internal(format!("spawn_blocking panic: {e}")))?;
 
-        let json_str = json_str?;
+            let json_str = json_str?;
 
-        // Validate JSON before storing.
-        serde_json::from_str::<serde_json::Value>(&json_str)
-            .map_err(|e| ContextCutterError::InvalidJson(format!("response is not valid JSON: {e}")))?;
+            // Validate JSON before storing.
+            serde_json::from_str::<serde_json::Value>(&json_str).map_err(|e| {
+                ContextCutterError::InvalidJson(format!("response is not valid JSON: {e}"))
+            })?;
 
-        let handle_id = engine_store(&json_str)?;
-        let teaser_str = engine_teaser(&handle_id)?;
-        let teaser: serde_json::Value =
-            serde_json::from_str(&teaser_str).unwrap_or(serde_json::Value::Null);
+            let handle_id = engine_store(&json_str)?;
+            let teaser_str = engine_teaser(&handle_id)?;
+            let teaser: serde_json::Value =
+                serde_json::from_str(&teaser_str).unwrap_or(serde_json::Value::Null);
 
-        info!(handle_id = handle_id.as_str(), "stored fetched JSON payload");
+            info!(handle_id = handle_id.as_str(), "stored fetched JSON payload");
 
-        let out = serde_json::json!({
-            "handle_id": handle_id,
-            "teaser": teaser,
-        });
-        Ok(out.to_string())
+            let out = serde_json::json!({
+                "handle_id": handle_id,
+                "teaser": teaser,
+            });
+            Ok(out.to_string())
         }
 
         inner(params).await.map_err(boundary_error)
@@ -269,10 +272,7 @@ impl ContextCutterServer {
                        Accepts full JSONPath ($.foo.bar) or dot notation (foo.bar). \
                        Returns the matched value as JSON or null."
     )]
-    fn query_handle(
-        &self,
-        Parameters(params): Parameters<QueryParams>,
-    ) -> Result<String, String> {
+    fn query_handle(&self, Parameters(params): Parameters<QueryParams>) -> Result<String, String> {
         #[instrument(skip(params), fields(handle_id = %params.handle_id))]
         fn inner(params: QueryParams) -> Result<String, ContextCutterError> {
             validate_query_inputs(&params.handle_id, &params.json_path)?;

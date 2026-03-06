@@ -4,8 +4,8 @@
 //! - The Rust MCP binary (`src/bin/mcp.rs`) directly.
 //! - The PyO3 bindings in `src/lib.rs` (via thin wrappers that convert errors).
 
-use sha2::{Digest, Sha256};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::error::ContextCutterError;
 use crate::parser;

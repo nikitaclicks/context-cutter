@@ -22,7 +22,10 @@ pub enum ContextCutterError {
     RequestFailed(String),
 
     #[error("payload too large: {actual_bytes} bytes exceeds limit {max_bytes} bytes")]
-    PayloadTooLarge { actual_bytes: usize, max_bytes: usize },
+    PayloadTooLarge {
+        actual_bytes: usize,
+        max_bytes: usize,
+    },
 
     #[error("internal error: {0}")]
     Internal(String),
