@@ -7,7 +7,9 @@
 use std::sync::OnceLock;
 
 use dashmap::DashMap;
+#[cfg(feature = "python")]
 use pyo3::exceptions::PyValueError;
+#[cfg(feature = "python")]
 use pyo3::prelude::*;
 use serde_json::Value;
 
@@ -29,17 +31,20 @@ pub fn global_store_get(handle_id: &str) -> Option<Value> {
 }
 
 /// Python-facing explicit store wrapper.
+#[cfg(feature = "python")]
 #[pyclass]
 pub struct ContextStore {
     inner: DashMap<String, Value>,
 }
 
+#[cfg(feature = "python")]
 impl Default for ContextStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
+#[cfg(feature = "python")]
 #[pymethods]
 impl ContextStore {
     /// Creates a new empty in-memory context store.
@@ -102,6 +107,7 @@ mod tests {
         assert_eq!(got, Some(json!({"x": 1})));
     }
 
+    #[cfg(feature = "python")]
     #[test]
     fn context_store_basic_operations() {
         let store = ContextStore::new();
@@ -125,6 +131,7 @@ mod tests {
         assert!(!store.remove("h1"));
     }
 
+    #[cfg(feature = "python")]
     #[test]
     fn context_store_clear_empties_entries() {
         let store = ContextStore::new();

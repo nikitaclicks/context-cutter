@@ -1,8 +1,6 @@
 //! Parsing and query logic for teaser generation and JSONPath selection.
 
 use jsonpath_rust::JsonPath;
-use pyo3::exceptions::PyValueError;
-use pyo3::prelude::*;
 use serde_json::{json, Map, Value};
 
 const MAX_DEPTH: usize = 3;
@@ -134,10 +132,10 @@ pub fn generate_teaser_from_value(value: &Value) -> String {
     teaser.to_string()
 }
 
-fn normalize_json_path(path: &str) -> PyResult<String> {
+fn normalize_json_path(path: &str) -> Result<String, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
-        return Err(PyValueError::new_err("json path must not be empty"));
+        return Err("json path must not be empty".to_string());
     }
     if trimmed.starts_with('$') {
         return Ok(trimmed.to_string());
@@ -171,18 +169,18 @@ fn normalize_json_path(path: &str) -> PyResult<String> {
 }
 
 /// Executes a JSONPath query against a stored value.
-pub fn query_json_path(value: &Value, json_path: &str) -> PyResult<String> {
+pub fn query_json_path(value: &Value, json_path: &str) -> Result<String, String> {
     let normalized = normalize_json_path(json_path)?;
     let matches = value
         .query(&normalized)
-        .map_err(|e| PyValueError::new_err(format!("invalid json path: {e}")))?;
+        .map_err(|e| format!("invalid json path: {e}"))?;
 
     if matches.is_empty() {
         return Ok("null".to_string());
     }
     if matches.len() == 1 {
         return serde_json::to_string(matches[0])
-            .map_err(|e| PyValueError::new_err(format!("failed to serialize query result: {e}")));
+            .map_err(|e| format!("failed to serialize query result: {e}"));
     }
     serde_json::to_string(
         &matches
@@ -190,13 +188,12 @@ pub fn query_json_path(value: &Value, json_path: &str) -> PyResult<String> {
             .cloned()
             .collect::<Vec<Value>>(),
     )
-    .map_err(|e| PyValueError::new_err(format!("failed to serialize query results: {e}")))
+    .map_err(|e| format!("failed to serialize query results: {e}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pyo3::Python;
     use serde_json::{json, Value};
 
     #[test]
@@ -207,9 +204,8 @@ mod tests {
 
     #[test]
     fn normalize_json_path_rejects_empty_paths() {
-        Python::initialize();
         let err = normalize_json_path("   ").expect_err("empty path should fail");
-        assert!(err.to_string().contains("json path must not be empty"));
+        assert!(err.contains("json path must not be empty"));
     }
 
     #[test]

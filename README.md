@@ -1,6 +1,6 @@
 # ContextCutter
 
-Rust-first Handle & Path library for LLM tool-calling.
+Rust-first Handle & Teaser middleware for LLM tool-calling.
 
 When a tool returns a large JSON payload, sending the full object back to the model is expensive and harms reasoning quality.  
 `ContextCutter` stores the full payload behind a lightweight handle and returns a compact structural teaser. The model can then request only the fields it needs.
@@ -10,42 +10,110 @@ When a tool returns a large JSON payload, sending the full object back to the mo
 - Avoids pushing 50KB+ API payloads into context windows.
 - Reduces token cost and "lost in the middle" failures.
 - Supports multi-step retrieval via handle + JSONPath/dot-path queries.
-- Keeps heavy operations in Rust (PyO3), with Python as the bridge.
+- Ships as a standalone Rust binary MCP server — no Python runtime required for integrations.
 
 ## Architecture
 
-- **Rust (`src/`)**
-  - In-memory handle store
-  - Teaser generation logic
-  - JSONPath query execution
-  - PyO3 module: `context_cutter._lib`
-- **Python (`python/context_cutter/`)**
-  - Decorator ergonomics (`@lazy_handle`)
-  - Public API exports
-  - Tool manifest helper
-  - Optional custom stores (`InMemoryStore`, `RedisStore`) for non-default flows
+- **Rust MCP server (primary integration)** — single binary `context-cutter-mcp`
+  - In-memory handle store (`DashMap`)
+  - Teaser generation and JSONPath query execution
+  - MCP stdio transport (`rmcp`)
+  - HTTP fetch (`ureq`)
+- **Python SDK (optional, developer ergonomics)** — PyO3/Maturin compiled bridge into the same Rust engine
+  - `@lazy_handle` / `@lazy_tool` decorator ergonomics
+  - `query_handle`, `store_response`, `generate_teaser`, `query_path` functions
+  - Tool manifest helper for LLM framework wiring
+  - Optional custom stores (`InMemoryStore`, `RedisStore`)
 
-## Install
+## Integration (MCP)
+
+`context-cutter-mcp` is the primary integration surface. It runs as a Model Context Protocol server over stdio and exposes two tools:
+
+- `fetch_json_cutted(url, method?, headers?, body?, timeout_seconds?)` — fetches a JSON endpoint, stores the payload, returns `{handle_id, teaser}`.
+- `query_handle(handle_id, json_path)` — extracts a specific value from the stored payload via JSONPath without loading the full payload into context.
+
+### Build from source
+
+```bash
+cargo build --release --bin context-cutter-mcp
+# Binary: target/release/context-cutter-mcp
+```
+
+### MCP client configuration
+
+#### OpenCode (`~/.config/opencode/opencode.json`)
+
+```json
+{
+  "mcp": {
+    "context-cutter": {
+      "type": "local",
+      "command": ["/path/to/context-cutter-mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+#### Claude Code (`.mcp.json` in project root or `~/.mcp.json`)
+
+```json
+{
+  "mcpServers": {
+    "context-cutter": {
+      "command": "/path/to/context-cutter-mcp",
+      "args": []
+    }
+  }
+}
+```
+
+#### Cursor / VS Code Copilot Chat (`.vscode/mcp.json`)
+
+```json
+{
+  "servers": {
+    "context-cutter": {
+      "type": "stdio",
+      "command": "/path/to/context-cutter-mcp"
+    }
+  }
+}
+```
+
+### Suggested agent flow
+
+1. Configure `context-cutter-mcp` as an MCP tool server in your LLM client.
+2. Ask the agent to call `fetch_json_cutted` for external APIs instead of fetching directly.
+3. Let the agent call `query_handle` for follow-up fields or array items.
+
+This avoids dumping entire API responses into context and works across all MCP-compatible clients.
+
+## Python SDK (optional)
+
+The Python package wraps the same Rust engine via a PyO3/Maturin compiled extension — useful for Python-native agent stacks that do not use MCP.
+
+### Install
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e .
+pip install -e .
 ```
 
-For development:
+Development extras:
 
 ```bash
-python -m pip install -e ".[dev]"
+pip install -e ".[dev]"
 ```
 
-Redis support (optional):
+Redis store support (optional):
 
 ```bash
-python -m pip install -e ".[redis]"
+pip install -e ".[redis]"
 ```
 
-## Quick start
+### Quick start
 
 ```python
 from context_cutter import lazy_handle, query_handle
@@ -53,7 +121,7 @@ from context_cutter import lazy_handle, query_handle
 
 @lazy_handle
 def get_github_contributors() -> dict:
-    # Replace this with real HTTP call result.
+    # Replace with a real HTTP call result.
     return {
         "contributors": [
             {"login": "octocat", "contributions": 500, "id": 1},
@@ -92,39 +160,29 @@ login = query_handle(result["handle_id"], "contributors.0.login")
 
 ### Interception
 
-- `lazy_handle`: decorator that:
-  1. executes wrapped function
-  2. stores payload under a generated handle
-  3. returns `{handle_id, teaser}`
-- `lazy_tool`: backward-compatible alias of `lazy_handle`
+- `lazy_handle`: decorator that executes the wrapped function, stores the payload, and returns `{handle_id, teaser}`.
+- `lazy_tool`: backward-compatible alias of `lazy_handle`.
 
 ### Querying
 
 - `query_handle(handle_id, json_path) -> Any`
-  - Returns parsed Python values (`dict`, `list`, scalar, or `None`)
-  - Accepts JSONPath and simple dot notation
+  - Returns parsed Python values (`dict`, `list`, scalar, or `None`).
+  - Accepts JSONPath (`$.foo.bar`) and simple dot notation (`foo.bar`).
 
-### Compatibility functions
+### Low-level functions
 
-- `store_response(payload) -> str`  
-  Stores payload and returns handle id.
-- `generate_teaser(handle_id) -> str`  
-  Returns teaser JSON string.
-- `query_path(handle_id, json_path) -> str`  
-  Returns query result as JSON string.
-
-These are useful for legacy tool wiring that expects serialized JSON boundaries.
+- `store_response(payload) -> str` — stores payload, returns `handle_id`.
+- `generate_teaser(handle_id) -> str` — returns teaser as a JSON string.
+- `query_path(handle_id, json_path) -> str` — returns query result as a JSON string.
 
 ### Store abstractions (Python)
 
-- `BaseStore`
-- `InMemoryStore`
-- `RedisStore`
+- `BaseStore`, `InMemoryStore`, `RedisStore`
 - `set_default_store(...)` / `get_default_store()`
 
-Note: default no-argument API paths use the Rust-backed global store for speed.
+The default no-argument API paths use the Rust-backed global store (`DashMap`) for speed.
 
-## Tool manifest
+### Tool manifest
 
 Generate tool definitions for LLM frameworks:
 
@@ -134,71 +192,15 @@ from context_cutter import generate_tool_manifest
 tools = generate_tool_manifest()
 ```
 
-Includes `query_handle` and a backward-compatible alias entry.
-
-## OpenCode integration (MCP)
-
-Install MCP support:
-
-```bash
-source .venv/bin/activate
-python -m pip install -e ".[mcp]"
-```
-
-Run the MCP server over stdio:
-
-```bash
-source .venv/bin/activate
-context-cutter-mcp
-```
-
-OpenCode MCP config snippets (copy/paste):
-
-```json
-{
-  "mcp": {
-    "context-cutter": {
-      "type": "local",
-      "command": ["/path/to/context-cutter/.venv/bin/context-cutter-mcp"],
-      "enabled": true
-    }
-  }
-}
-```
-
-```json
-{
-  "mcp": {
-    "context-cutter": {
-      "type": "local",
-      "command": [
-        "bash",
-        "-lc",
-        "cd /path/to/context-cutter && source .venv/bin/activate && context-cutter-mcp"
-      ]
-    }
-  }
-}
-```
-
-Use the first snippet when OpenCode accepts absolute command paths. Use the second when shell activation is required.
-
-Exposed MCP tools:
-
-- `fetch_json_cutted(url, method="GET", headers=None, body=None, timeout_seconds=45.0)`
-  - Fetches JSON from an API and returns `{handle_id, teaser}`.
-- `query_handle_mcp(handle_id, json_path)`
-  - Retrieves only the value/path needed from stored JSON.
-
-Suggested OpenCode flow:
-
-1. Configure `context-cutter-mcp` as an MCP tool server.
-2. Ask the agent to call `fetch_json_cutted` for external APIs.
-3. Let the agent call `query_handle_mcp` for follow-up fields/counts.
-
-This avoids global HTTP monkeypatching and works cleanly for multi-integration setups.
-
 ## Run tests
+
+### Rust
+
+```bash
+cargo test
+```
+
+### Python
 
 ```bash
 source .venv/bin/activate
@@ -208,32 +210,23 @@ pytest -q
 Run benchmarks:
 
 ```bash
-source .venv/bin/activate
 pytest -m benchmark --benchmark-json benchmark.json
 ```
 
-Run deterministic AI e2e tests (local/manual):
+Run deterministic AI e2e tests (offline):
 
 ```bash
-source .venv/bin/activate
 pytest -m ai_e2e_offline -q
 ```
 
-Run live AI e2e smoke (optional; requires API key):
+Run live AI e2e smoke (requires API key):
 
 ```bash
-source .venv/bin/activate
 CONTEXT_CUTTER_LIVE_PROVIDER=openai OPENAI_API_KEY=... CONTEXT_CUTTER_OPENAI_MODEL=gpt-4.1-mini pytest -m ai_e2e_live -q
-```
-
-Run live AI e2e smoke with Gemini (optional; requires API key):
-
-```bash
-source .venv/bin/activate
 CONTEXT_CUTTER_LIVE_PROVIDER=gemini GEMINI_API_KEY=... CONTEXT_CUTTER_GEMINI_MODEL=gemini-1.5-pro pytest -m ai_e2e_live -q
 ```
 
 CI notes:
 
-- Default PR/push workflow excludes AI e2e markers.
-- Full AI e2e execution is available via manual workflow dispatch in `.github/workflows/ai-e2e.yml` (provider selectable: `openai` or `gemini`).
+- Default PR/push workflow excludes `ai_e2e_live` and `benchmark` markers.
+- Full AI e2e execution via manual dispatch in `.github/workflows/ai-e2e.yml` (provider: `openai` or `gemini`).

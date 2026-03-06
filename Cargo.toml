@@ -3,13 +3,28 @@ name = "context-cutter"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# Enable PyO3 bindings for the Python extension module.
+python = ["dep:pyo3"]
+
 [lib]
 name = "context_cutter"
 crate-type = ["cdylib", "rlib"]
 
+[[bin]]
+name = "context-cutter-mcp"
+path = "src/bin/mcp.rs"
+
 [dependencies]
-pyo3 = { version = "0.28", features = ["abi3-py39"] }
+# PyO3 is optional — only required for the Python extension built by Maturin.
+pyo3 = { version = "0.28", features = ["abi3-py39", "extension-module"], optional = true }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 dashmap = "6"
 jsonpath-rust = "1"
 sha2 = "0.10"
+# MCP server dependencies (used by the binary target, not required for Python lib).
+rmcp = { version = "1.1.0", features = ["server", "macros", "transport-io", "schemars"] }
+tokio = { version = "1", features = ["full"] }
+ureq = "2"
+schemars = "1"

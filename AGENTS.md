@@ -7,24 +7,69 @@ If there is any conflict between this file and other documentation, prefer `AGEN
 ## Project Source of Truth: `ContextCutter`
 
 ### 1. The Mission
-To eliminate "JSON Bloat" in LLM agentic workflows. `ContextCutter` is a high-performance middleware that intercepts massive API responses and replaces them with a lightweight "Teaser" and a "Lazy Handle," saving up to 90% of context window tokens.
+
+Eliminate "JSON Bloat" in LLM agentic workflows. `ContextCutter` intercepts large API responses and replaces them with a lightweight "Teaser" and a "Lazy Handle," saving up to 90% of context-window tokens.
 
 ### 2. The Architecture
 
-- **Engine (Rust):** High-speed JSON parsing (`serde_json`), tree-walking for schema mapping, and JSONPath execution (`jsonpath-rust`).
-- **Storage:** A stateful, thread-safe in-memory cache (`DashMap`) or a persistent `Valkey/Redis` store to hold the full JSON payloads.
-- **Bridge (PyO3/Maturin):** A compiled Rust-to-Python bridge that ensures near-zero latency for data transfers between the agent and the storage.
-- **UX (Python):** A simple `@lazy_tool` decorator that wraps existing API functions and automatically registers the `query_handle` tool for the agent.
+**Primary integration — Rust MCP server binary (`context-cutter-mcp`)**
+
+- Written in Rust. Built with `cargo build --release --bin context-cutter-mcp`.
+- Runs as a stdio MCP server using the `rmcp` crate.
+- Exposes two MCP tools: `fetch_json_cutted` and `query_handle`.
+- HTTP fetching via `ureq` (sync, spawned inside `tokio::task::spawn_blocking`).
+- In-memory handle store via `DashMap` (global, shared across requests).
+- Handle IDs are deterministic SHA-256 digests of canonicalized JSON (`hdl_<12hex>`).
+- Teaser generation and JSONPath query execution live in `src/engine.rs` (pure Rust, no PyO3 dependency).
+- PyO3 bindings live in `src/lib.rs` gated under the `python` Cargo feature.
+
+**Secondary integration — Python SDK (optional)**
+
+- PyO3/Maturin compiled extension. Build with `maturin develop --features python`.
+- Wraps the same Rust engine functions from `src/engine.rs`.
+- Provides `@lazy_handle` / `@lazy_tool` decorators, `query_handle`, `store_response`, `generate_teaser`, `query_path`, `generate_tool_manifest`.
+- Optional custom stores: `InMemoryStore`, `RedisStore` (pure Python, for non-default flows).
+- Default paths use the Rust-backed global DashMap store.
 
 ### 3. The Interaction Flow
 
-1. Agent calls a tool (e.g., `get_user_data`).
-2. `ContextCutter` intercepts the 50KB JSON.
-3. It stores the JSON and returns a 200-token "Teaser" map + `handle_id`.
-4. Agent uses `query_handle(handle_id, "$.path.to.data")` to fetch only the specific value it needs.
+**Via MCP (primary)**
+
+1. LLM client calls `fetch_json_cutted(url, ...)`.
+2. Rust binary fetches the URL, stores the JSON, returns `{handle_id, teaser}`.
+3. LLM client calls `query_handle(handle_id, "$.path.to.data")` to retrieve specific fields.
+
+**Via Python SDK (optional)**
+
+1. Agent calls a `@lazy_handle`-decorated function.
+2. `ContextCutter` intercepts the return value (the JSON payload).
+3. Stores it and returns `{handle_id, teaser}`.
+4. Agent calls `query_handle(handle_id, "$.path.to.data")` for specific fields.
 
 ### 4. Key Technical Requirements
 
-- Must support deterministic `handle_id` generation for session persistence.
-- Must be storage agnostic (in-memory for dev, Redis for prod).
-- Must provide a minimized "Schema Teaser" that lists keys and array lengths without the raw data.
+- Deterministic `handle_id` generation: SHA-256 of canonicalized JSON, prefix `hdl_`, 12-char hex suffix.
+- Storage agnostic: in-memory `DashMap` for dev/MCP; optional Redis for Python SDK prod flows.
+- Schema Teaser: lists keys and array lengths without raw data values.
+- MCP tool names are stable and must not change: `fetch_json_cutted`, `query_handle`.
+- PyO3 feature is opt-in (`--features python`); the binary target has no PyO3 dependency.
+
+### 5. Source Layout
+
+```
+src/
+  engine.rs      # Pure Rust: compute_handle_id, engine_store, engine_teaser, engine_query
+  parser.rs      # JSON parsing helpers (no PyO3)
+  store.rs       # DashMap global store + PyO3 ContextStore (feature-gated)
+  lib.rs         # PyO3 module entry point (feature-gated "python")
+  bin/
+    mcp.rs       # Rust MCP server binary
+python/
+  context_cutter/
+    __init__.py  # Public API
+    core.py      # query_handle, lazy_handle implementation
+    store.py     # BaseStore, InMemoryStore, RedisStore
+    tools.py     # generate_tool_manifest
+    ...
+tests/           # pytest test suite (Python SDK)
+```
