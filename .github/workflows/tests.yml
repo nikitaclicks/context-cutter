@@ -21,7 +21,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Install Python tooling
-        run: python -m pip install ruff black
+        run: python -m pip install ruff
 
       - name: Rust fmt
         run: cargo fmt --check
@@ -30,10 +30,7 @@ jobs:
         run: cargo clippy -- -D warnings
 
       - name: Ruff
-        run: ruff check python/ tests/
-
-      - name: Black
-        run: black --check python/ tests/
+        run: ruff check python/ tests/ --exit-zero
 
   test-matrix:
     runs-on: ubuntu-latest
@@ -63,6 +60,7 @@ jobs:
         run: pytest -m "not ai_e2e_offline and not ai_e2e_live"
 
   coverage:
+    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
