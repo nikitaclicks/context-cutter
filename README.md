@@ -1,232 +1,186 @@
 # ContextCutter
 
-Rust-first Handle & Teaser middleware for LLM tool-calling.
+[![Tests](https://github.com/nikitaclicks/context-cutter/actions/workflows/tests.yml/badge.svg)](https://github.com/nikitaclicks/context-cutter/actions/workflows/tests.yml)
+[![codecov](https://codecov.io/gh/nikitaclicks/context-cutter/branch/main/graph/badge.svg)](https://codecov.io/gh/nikitaclicks/context-cutter)
 
-When a tool returns a large JSON payload, sending the full object back to the model is expensive and harms reasoning quality.  
-`ContextCutter` stores the full payload behind a lightweight handle and returns a compact structural teaser. The model can then request only the fields it needs.
+Agent-agnostic middleware that eliminates JSON bloat in LLM tool-calling workflows.
 
-## Why this exists
+`ContextCutter` keeps large API responses out of the model context window by returning:
 
-- Avoids pushing 50KB+ API payloads into context windows.
-- Reduces token cost and "lost in the middle" failures.
-- Supports multi-step retrieval via handle + JSONPath/dot-path queries.
-- Ships as a standalone Rust binary MCP server — no Python runtime required for integrations.
+- a deterministic handle (`hdl_<12hex>`) for the full payload
+- a compact structural teaser for planning
 
-## Architecture
+Agents then request only targeted fields via JSONPath when needed.
 
-- **Rust MCP server (primary integration)** — single binary `context-cutter-mcp`
-  - In-memory handle store (`DashMap`)
-  - Teaser generation and JSONPath query execution
-  - MCP stdio transport (`rmcp`)
-  - HTTP fetch (`ureq`)
-- **Python SDK (optional, developer ergonomics)** — PyO3/Maturin compiled bridge into the same Rust engine
-  - `@lazy_handle` / `@lazy_tool` decorator ergonomics
-  - `query_handle`, `store_response`, `generate_teaser`, `query_path` functions
-  - Tool manifest helper for LLM framework wiring
-  - Optional custom stores (`InMemoryStore`, `RedisStore`)
+## Why ContextCutter
 
-## Integration (MCP)
+- Reduces prompt token usage for large JSON responses.
+- Prevents "lost in the middle" degradation on multi-step tasks.
+- Works with any MCP-compatible client.
+- Ships as a standalone Rust binary (`context-cutter-mcp`) with no Python runtime required.
 
-`context-cutter-mcp` is the primary integration surface. It runs as a Model Context Protocol server over stdio and exposes two tools:
+## MCP Tool Contract (Stable)
 
-- `fetch_json_cutted(url, method?, headers?, body?, timeout_seconds?)` — fetches a JSON endpoint, stores the payload, returns `{handle_id, teaser}`.
-- `query_handle(handle_id, json_path)` — extracts a specific value from the stored payload via JSONPath without loading the full payload into context.
+- `fetch_json_cutted(url, method?, headers?, body?, timeout_seconds?)`
+- `query_handle(handle_id, json_path)`
+
+These tool names are stable and should not be renamed.
+
+## Install
+
+## 1) Binary (recommended)
+
+### GitHub Release
+
+Download the platform binary from Releases and place it on `PATH`:
+
+- Linux: `context-cutter-mcp-x86_64-linux-gnu`
+- macOS (Intel): `context-cutter-mcp-x86_64-apple-darwin`
+- macOS (Apple Silicon): `context-cutter-mcp-aarch64-apple-darwin`
+- Windows: `context-cutter-mcp-x86_64-pc-windows-msvc.exe`
 
 ### Build from source
 
 ```bash
 cargo build --release --bin context-cutter-mcp
-# Binary: target/release/context-cutter-mcp
+./target/release/context-cutter-mcp
 ```
 
-### MCP client configuration
+## 2) Zero-install via `npx`
 
-#### OpenCode (`~/.config/opencode/opencode.json`)
-
-```json
-{
-  "mcp": {
-    "context-cutter": {
-      "type": "local",
-      "command": ["/path/to/context-cutter-mcp"],
-      "enabled": true
-    }
-  }
-}
+```bash
+npx context-cutter-mcp
 ```
 
-#### Claude Code (`.mcp.json` in project root or `~/.mcp.json`)
+The npm wrapper downloads the matching GitHub Release binary automatically.
+
+## 3) Docker
+
+```bash
+docker run --rm -i ghcr.io/nikitaclicks/context-cutter-mcp:latest
+```
+
+## 4) Homebrew
+
+```bash
+brew tap nikitaclicks/context-cutter
+brew install context-cutter-mcp
+```
+
+## 5) Python SDK (optional)
+
+```bash
+pip install context-cutter
+```
+
+## Client Configuration Examples
+
+## Claude Desktop
+
+`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS path):
 
 ```json
 {
   "mcpServers": {
     "context-cutter": {
-      "command": "/path/to/context-cutter-mcp",
-      "args": []
+      "command": "npx",
+      "args": ["-y", "context-cutter-mcp"]
     }
   }
 }
 ```
 
-#### Cursor / VS Code Copilot Chat (`.vscode/mcp.json`)
+## Cursor
+
+`.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "context-cutter": {
+      "command": "npx",
+      "args": ["-y", "context-cutter-mcp"]
+    }
+  }
+}
+```
+
+## VS Code Copilot Chat
+
+`.vscode/mcp.json`:
 
 ```json
 {
   "servers": {
     "context-cutter": {
       "type": "stdio",
-      "command": "/path/to/context-cutter-mcp"
+      "command": "npx",
+      "args": ["-y", "context-cutter-mcp"]
     }
   }
 }
 ```
 
-### Suggested agent flow
-
-1. Configure `context-cutter-mcp` as an MCP tool server in your LLM client.
-2. Ask the agent to call `fetch_json_cutted` for external APIs instead of fetching directly.
-3. Let the agent call `query_handle` for follow-up fields or array items.
-
-This avoids dumping entire API responses into context and works across all MCP-compatible clients.
-
-## Python SDK (optional)
-
-The Python package wraps the same Rust engine via a PyO3/Maturin compiled extension — useful for Python-native agent stacks that do not use MCP.
-
-### Install
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
-```
-
-Development extras:
-
-```bash
-pip install -e ".[dev]"
-```
-
-Redis store support (optional):
-
-```bash
-pip install -e ".[redis]"
-```
-
-### Quick start
+## OpenAI Agents SDK
 
 ```python
-from context_cutter import lazy_handle, query_handle
+from agents import Agent
 
-
-@lazy_handle
-def get_github_contributors() -> dict:
-    # Replace with a real HTTP call result.
-    return {
-        "contributors": [
-            {"login": "octocat", "contributions": 500, "id": 1},
-            {"login": "hubot", "contributions": 123, "id": 2},
-        ],
-        "meta": {"total": 2},
-    }
-
-
-result = get_github_contributors()
-# {
-#   "handle_id": "hdl_xxxxxxxxxxxx",
-#   "teaser": {
-#     "_teaser": True,
-#     "_type": "object",
-#     "keys": ["contributors", "meta"],
-#     "structure": {
-#       "contributors": {"_type": "Array[2]", "item_keys": ["contributions", "id", "login"]},
-#       "meta": {"total": 2}
-#     }
-#   }
-# }
-
-top = query_handle(result["handle_id"], "$.contributors[0]")
-# {"login": "octocat", "contributions": 500, "id": 1}
+agent = Agent(
+    name="assistant",
+    mcp_servers=[
+        {
+            "server_label": "context-cutter",
+            "command": "npx",
+            "args": ["-y", "context-cutter-mcp"],
+        }
+    ],
+)
 ```
 
-Dot-notation also works:
+## Operational Configuration
 
-```python
-login = query_handle(result["handle_id"], "contributors.0.login")
-# "octocat"
-```
+Environment variables:
 
-## API
+- `CONTEXT_CUTTER_MAX_HANDLES` (default: `1000`)
+- `CONTEXT_CUTTER_TTL_SECS` (default: `3600`)
+- `CONTEXT_CUTTER_MAX_PAYLOAD_BYTES` (default: `10485760`)
+- `CONTEXT_CUTTER_LOG_FORMAT` (`plain` or `json`, default: `plain`)
+- `RUST_LOG` (default: `info`)
 
-### Interception
+## Security Defaults
 
-- `lazy_handle`: decorator that executes the wrapped function, stores the payload, and returns `{handle_id, teaser}`.
-- `lazy_tool`: backward-compatible alias of `lazy_handle`.
+- HTTPS-only URL fetching in `fetch_json_cutted` (SSRF hardening)
+- Null-byte rejection for URL/headers/handle/path inputs
+- JSONPath length bounds (`<= 4096` chars)
+- Response payload size limits
 
-### Querying
-
-- `query_handle(handle_id, json_path) -> Any`
-  - Returns parsed Python values (`dict`, `list`, scalar, or `None`).
-  - Accepts JSONPath (`$.foo.bar`) and simple dot notation (`foo.bar`).
-
-### Low-level functions
-
-- `store_response(payload) -> str` — stores payload, returns `handle_id`.
-- `generate_teaser(handle_id) -> str` — returns teaser as a JSON string.
-- `query_path(handle_id, json_path) -> str` — returns query result as a JSON string.
-
-### Store abstractions (Python)
-
-- `BaseStore`, `InMemoryStore`, `RedisStore`
-- `set_default_store(...)` / `get_default_store()`
-
-The default no-argument API paths use the Rust-backed global store (`DashMap`) for speed.
-
-### Tool manifest
-
-Generate tool definitions for LLM frameworks:
-
-```python
-from context_cutter import generate_tool_manifest
-
-tools = generate_tool_manifest()
-```
-
-## Run tests
-
-### Rust
+## Development
 
 ```bash
 cargo test
+cargo clippy -- -D warnings
+cargo fmt --check
+
+python -m pip install -e ".[dev]"
+pytest -m "not ai_e2e_live"
 ```
 
-### Python
+See `CONTRIBUTING.md` for full contributor workflow.
 
-```bash
-source .venv/bin/activate
-pytest -q
+## Project Layout
+
+```text
+src/
+  engine.rs      # Pure Rust core logic
+  store.rs       # Bounded in-memory store (TTL + LRU)
+  parser.rs      # Teaser + JSONPath helpers
+  lib.rs         # Optional PyO3 bindings
+  bin/mcp.rs     # MCP stdio server binary
+python/context_cutter/
+  ...            # Optional Python SDK wrappers
 ```
 
-Run benchmarks:
+## License
 
-```bash
-pytest -m benchmark --benchmark-json benchmark.json
-```
-
-Run deterministic AI e2e tests (offline):
-
-```bash
-pytest -m ai_e2e_offline -q
-```
-
-Run live AI e2e smoke (requires API key):
-
-```bash
-CONTEXT_CUTTER_LIVE_PROVIDER=openai OPENAI_API_KEY=... CONTEXT_CUTTER_OPENAI_MODEL=gpt-4.1-mini pytest -m ai_e2e_live -q
-CONTEXT_CUTTER_LIVE_PROVIDER=gemini GEMINI_API_KEY=... CONTEXT_CUTTER_GEMINI_MODEL=gemini-1.5-pro pytest -m ai_e2e_live -q
-```
-
-CI notes:
-
-- Default PR/push workflow excludes `ai_e2e_live` and `benchmark` markers.
-- Full AI e2e execution via manual dispatch in `.github/workflows/ai-e2e.yml` (provider: `openai` or `gemini`).
+MIT. See `LICENSE`.

@@ -2,6 +2,11 @@
 name = "context-cutter"
 version = "0.1.0"
 edition = "2021"
+description = "Agent-agnostic middleware that cuts JSON payload bloat with lazy handles and teasers"
+license = "MIT"
+repository = "https://github.com/nikitaclicks/context-cutter"
+keywords = ["mcp", "llm", "json", "agent", "middleware"]
+categories = ["command-line-utilities", "api-bindings", "development-tools"]
 
 [features]
 # Enable PyO3 bindings for the Python extension module.
@@ -23,6 +28,9 @@ serde_json = "1"
 dashmap = "6"
 jsonpath-rust = "1"
 sha2 = "0.10"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 # MCP server dependencies (used by the binary target, not required for Python lib).
 rmcp = { version = "1.1.0", features = ["server", "macros", "transport-io", "schemars"] }
 tokio = { version = "1", features = ["full"] }

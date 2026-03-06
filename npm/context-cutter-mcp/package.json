@@ -1,0 +1,29 @@
+{
+  "name": "context-cutter-mcp",
+  "version": "0.1.0",
+  "description": "npx launcher for the ContextCutter MCP server binary",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nikitaclicks/context-cutter.git"
+  },
+  "homepage": "https://github.com/nikitaclicks/context-cutter",
+  "bugs": {
+    "url": "https://github.com/nikitaclicks/context-cutter/issues"
+  },
+  "type": "commonjs",
+  "bin": {
+    "context-cutter-mcp": "run.js"
+  },
+  "files": [
+    "run.js",
+    "install.js",
+    "bin/"
+  ],
+  "scripts": {
+    "postinstall": "node install.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

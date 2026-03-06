@@ -1,0 +1,9 @@
+{
+  "servers": {
+    "context-cutter": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "context-cutter-mcp"]
+    }
+  }
+}

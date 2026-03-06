@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "context-cutter": {
+      "command": "npx",
+      "args": ["-y", "context-cutter-mcp"]
+    }
+  }
+}

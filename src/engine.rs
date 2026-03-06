@@ -7,6 +7,7 @@
 use sha2::{Digest, Sha256};
 use serde_json::Value;
 
+use crate::error::ContextCutterError;
 use crate::parser;
 use crate::store;
 
@@ -30,35 +31,51 @@ pub fn canonicalize_json_value(value: &Value) -> Value {
 }
 
 /// Returns `hdl_<12-hex>` for a given JSON value — deterministic and key-order-independent.
-pub fn compute_handle_id(value: &Value) -> Result<String, String> {
+pub fn compute_handle_id(value: &Value) -> Result<String, ContextCutterError> {
     let canonical = canonicalize_json_value(value);
     let canonical_json = serde_json::to_string(&canonical)
-        .map_err(|e| format!("failed to serialize payload: {e}"))?;
+        .map_err(|e| ContextCutterError::Serialize(e.to_string()))?;
     let digest = Sha256::digest(canonical_json.as_bytes());
     let digest_hex = format!("{digest:x}");
     Ok(format!("hdl_{}", &digest_hex[..12]))
 }
 
 /// Parses `json_str`, stores the value in the global store, and returns the handle_id.
-pub fn engine_store(json_str: &str) -> Result<String, String> {
+pub fn engine_store(json_str: &str) -> Result<String, ContextCutterError> {
+    if json_str.as_bytes().contains(&0) {
+        return Err(ContextCutterError::Validation(
+            "json payload must not contain null bytes".to_string(),
+        ));
+    }
+
     let value: Value = serde_json::from_str(json_str)
-        .map_err(|e| format!("invalid JSON payload: {e}"))?;
+        .map_err(|e| ContextCutterError::InvalidJson(e.to_string()))?;
     let handle_id = compute_handle_id(&value)?;
     store::global_store_insert(handle_id.clone(), value);
     Ok(handle_id)
 }
 
 /// Returns the teaser JSON string for the given `handle_id`.
-pub fn engine_teaser(handle_id: &str) -> Result<String, String> {
+pub fn engine_teaser(handle_id: &str) -> Result<String, ContextCutterError> {
+    if handle_id.trim().is_empty() {
+        return Err(ContextCutterError::Validation(
+            "handle_id must not be empty".to_string(),
+        ));
+    }
     let value = store::global_store_get(handle_id)
-        .ok_or_else(|| format!("unknown handle_id: {handle_id}"))?;
+        .ok_or_else(|| ContextCutterError::UnknownHandle(handle_id.to_string()))?;
     Ok(parser::generate_teaser_from_value(&value))
 }
 
 /// Executes a JSONPath query against the stored payload for `handle_id`.
-pub fn engine_query(handle_id: &str, json_path: &str) -> Result<String, String> {
+pub fn engine_query(handle_id: &str, json_path: &str) -> Result<String, ContextCutterError> {
+    if handle_id.trim().is_empty() {
+        return Err(ContextCutterError::Validation(
+            "handle_id must not be empty".to_string(),
+        ));
+    }
     let value = store::global_store_get(handle_id)
-        .ok_or_else(|| format!("unknown handle_id: {handle_id}"))?;
+        .ok_or_else(|| ContextCutterError::UnknownHandle(handle_id.to_string()))?;
     parser::query_json_path(&value, json_path)
 }
 

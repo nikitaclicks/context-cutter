@@ -5,7 +5,8 @@
 //! Maturin passes `--features python` automatically via `pyproject.toml`.
 
 mod parser;
-mod store;
+pub mod store;
+pub mod error;
 pub mod engine;
 
 // ─── PyO3 bindings ────────────────────────────────────────────────────────────
@@ -14,30 +15,32 @@ mod python_bindings {
     use pyo3::exceptions::{PyKeyError, PyValueError};
     use pyo3::prelude::*;
 
+    use crate::error::ContextCutterError;
     pub use crate::store::ContextStore;
+
+    fn map_engine_error(err: ContextCutterError) -> PyErr {
+        match err {
+            ContextCutterError::UnknownHandle(_) => PyKeyError::new_err(err.to_string()),
+            _ => PyValueError::new_err(err.to_string()),
+        }
+    }
 
     /// Stores a full JSON payload and returns a lightweight handle ID.
     #[pyfunction]
     pub fn store_response(json_str: &str) -> PyResult<String> {
-        crate::engine::engine_store(json_str).map_err(PyValueError::new_err)
+        crate::engine::engine_store(json_str).map_err(map_engine_error)
     }
 
     /// Generates a teaser representation for a stored payload.
     #[pyfunction]
     pub fn generate_teaser(handle_id: &str) -> PyResult<String> {
-        crate::engine::engine_teaser(handle_id).map_err(PyKeyError::new_err)
+        crate::engine::engine_teaser(handle_id).map_err(map_engine_error)
     }
 
     /// Runs a JSONPath query against a stored payload.
     #[pyfunction]
     pub fn query_path(handle_id: &str, json_path: &str) -> PyResult<String> {
-        crate::engine::engine_query(handle_id, json_path).map_err(|e| {
-            if e.starts_with("unknown handle_id") {
-                PyKeyError::new_err(e)
-            } else {
-                PyValueError::new_err(e)
-            }
-        })
+        crate::engine::engine_query(handle_id, json_path).map_err(map_engine_error)
     }
 
     /// Python module initializer for `context_cutter._lib`.

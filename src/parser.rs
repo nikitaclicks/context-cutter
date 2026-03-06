@@ -3,8 +3,11 @@
 use jsonpath_rust::JsonPath;
 use serde_json::{json, Map, Value};
 
+use crate::error::ContextCutterError;
+
 const MAX_DEPTH: usize = 3;
 const MAX_STRING_LEN: usize = 24;
+const MAX_JSON_PATH_LEN: usize = 4096;
 
 fn value_type_name(value: &Value) -> &'static str {
     match value {
@@ -132,10 +135,24 @@ pub fn generate_teaser_from_value(value: &Value) -> String {
     teaser.to_string()
 }
 
-fn normalize_json_path(path: &str) -> Result<String, String> {
+fn normalize_json_path(path: &str) -> Result<String, ContextCutterError> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
-        return Err("json path must not be empty".to_string());
+        return Err(ContextCutterError::Validation(
+            "json path must not be empty".to_string(),
+        ));
+    }
+    if path.as_bytes().contains(&0) {
+        return Err(ContextCutterError::Validation(
+            "json path must not contain null bytes".to_string(),
+        ));
+    }
+    if trimmed.len() > MAX_JSON_PATH_LEN {
+        return Err(ContextCutterError::Validation(format!(
+            "json path too long: {} bytes (max {})",
+            trimmed.len(),
+            MAX_JSON_PATH_LEN
+        )));
     }
     if trimmed.starts_with('$') {
         return Ok(trimmed.to_string());
@@ -169,18 +186,18 @@ fn normalize_json_path(path: &str) -> Result<String, String> {
 }
 
 /// Executes a JSONPath query against a stored value.
-pub fn query_json_path(value: &Value, json_path: &str) -> Result<String, String> {
+pub fn query_json_path(value: &Value, json_path: &str) -> Result<String, ContextCutterError> {
     let normalized = normalize_json_path(json_path)?;
     let matches = value
         .query(&normalized)
-        .map_err(|e| format!("invalid json path: {e}"))?;
+        .map_err(|e| ContextCutterError::InvalidJsonPath(e.to_string()))?;
 
     if matches.is_empty() {
         return Ok("null".to_string());
     }
     if matches.len() == 1 {
         return serde_json::to_string(matches[0])
-            .map_err(|e| format!("failed to serialize query result: {e}"));
+            .map_err(|e| ContextCutterError::Serialize(e.to_string()));
     }
     serde_json::to_string(
         &matches
@@ -188,7 +205,7 @@ pub fn query_json_path(value: &Value, json_path: &str) -> Result<String, String>
             .cloned()
             .collect::<Vec<Value>>(),
     )
-    .map_err(|e| format!("failed to serialize query results: {e}"))
+    .map_err(|e| ContextCutterError::Serialize(e.to_string()))
 }
 
 #[cfg(test)]
@@ -205,7 +222,7 @@ mod tests {
     #[test]
     fn normalize_json_path_rejects_empty_paths() {
         let err = normalize_json_path("   ").expect_err("empty path should fail");
-        assert!(err.contains("json path must not be empty"));
+        assert!(err.to_string().contains("json path must not be empty"));
     }
 
     #[test]
