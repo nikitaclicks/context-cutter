@@ -83,7 +83,7 @@ jobs:
           python -m pip install pytest-cov
 
       - name: Rust coverage
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path rust.lcov
+        run: cargo llvm-cov --workspace --lcov --output-path rust.lcov
 
       - name: Python coverage
         run: pytest --cov=python/context_cutter --cov-report=xml

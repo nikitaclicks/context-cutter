@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import json
 from functools import wraps
-from typing import Any, Callable, ParamSpec, TypeVar
+from typing import Any, Callable, TypeVar
+
+try:
+    # Python 3.10+
+    from typing import ParamSpec
+except ImportError:  # pragma: no cover - exercised on 3.9 only
+    from typing_extensions import ParamSpec
 
 from .core import generate_teaser_map_for_handle, store_response
 from .schemas import LazyHandleResponse
