@@ -136,6 +136,112 @@ tools = generate_tool_manifest()
 
 Includes `query_handle` and a backward-compatible alias entry.
 
+## OpenCode integration (MVP)
+
+Use process-wide interception and OpenCode tool wiring helpers.
+
+For production-style integrations, prefer the native MCP server below.
+
+## OpenCode integration (Native MCP)
+
+Install MCP support:
+
+```bash
+source .venv/bin/activate
+python -m pip install -e ".[mcp]"
+```
+
+Run the MCP server over stdio:
+
+```bash
+source .venv/bin/activate
+context-cutter-mcp
+```
+
+OpenCode MCP config snippets (copy/paste):
+
+```json
+{
+  "mcp": {
+    "context-cutter": {
+      "type": "local",
+      "command": ["/path/to/context-cutter/.venv/bin/context-cutter-mcp"],
+      "enabled": true
+    }
+  }
+}
+```
+
+```json
+{
+  "mcp": {
+    "context-cutter": {
+      "type": "local",
+      "command": [
+        "bash",
+        "-lc",
+        "cd /path/to/context-cutter && source .venv/bin/activate && context-cutter-mcp"
+      ]
+    }
+  }
+}
+```
+
+Use the first snippet when OpenCode accepts absolute command paths. Use the second when shell activation is required.
+
+Exposed MCP tools:
+
+- `fetch_json_cutted(url, method="GET", headers=None, body=None, timeout_seconds=45.0)`
+  - Fetches JSON from an API and returns `{handle_id, teaser}`.
+- `query_handle_mcp(handle_id, json_path)`
+  - Retrieves only the value/path needed from stored JSON.
+
+Suggested OpenCode flow:
+
+1. Configure `context-cutter-mcp` as an MCP tool server.
+2. Ask the agent to call `fetch_json_cutted` for external APIs.
+3. Let the agent call `query_handle_mcp` for follow-up fields/counts.
+
+This avoids global HTTP monkeypatching and works cleanly for multi-integration setups.
+
+```python
+from context_cutter import (
+  enable_opencode_integration,
+  disable_opencode_integration,
+  build_opencode_tool_registry,
+  get_opencode_tool_manifest,
+)
+
+enable_opencode_integration(
+  clients=("urllib", "requests", "httpx"),
+  include_hosts=("api.restful-api.dev",),
+)
+
+tools = get_opencode_tool_manifest()
+registry = build_opencode_tool_registry()
+
+# OpenCode executor should call: registry[tool_name](**tool_args)
+
+# ... run your OpenCode agent/tool loop ...
+# JSON HTTP responses are replaced with: {"handle_id": "...", "teaser": {...}}
+# The model then calls query_handle/query_json_path through tool-calling.
+
+disable_opencode_integration()
+```
+
+MVP constraints:
+
+- Interception targets `urllib` and also `requests`/`httpx` when installed.
+- Non-JSON HTTP payloads are passed through unchanged.
+- Default behavior uses the Rust in-process store unless a Python store is injected.
+- Streaming/chunked response semantics are not preserved in this MVP path.
+
+Troubleshooting (`WebFetch` appears stuck):
+
+- This usually means model-provider HTTP responses were intercepted unintentionally.
+- Scope interception with `include_hosts=(...)` so only data-source APIs are wrapped.
+- Keep provider APIs excluded (default excludes common LLM hosts like `api.openai.com` and `api.anthropic.com`).
+
 ## Run tests
 
 ```bash

@@ -9,9 +9,13 @@ description = "LLM tool-calling utility that solves JSON Bloat"
 requires-python = ">=3.9"
 dependencies = ["pydantic>=2.0", "jsonpath-ng>=1.6"]
 
+[project.scripts]
+context-cutter-mcp = "context_cutter.mcp_server:main"
+
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "pytest-benchmark>=4.0"]
 redis = ["redis>=5.0"]
+mcp = ["mcp>=1.0"]
 
 [tool.maturin]
 python-source = "python"
