@@ -7,7 +7,6 @@ from hashlib import sha256
 from typing import Any
 
 from ._lib import (
-    ContextStore,
     generate_teaser as _rust_generate_teaser,
     query_path as _rust_query_path,
     store_response as _rust_store_response,
@@ -24,7 +23,9 @@ def _normalize_payload(payload: str | Any) -> Any:
 
 
 def _deterministic_handle_id(payload: Any) -> str:
-    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
     digest = sha256(canonical.encode("utf-8")).hexdigest()
     return f"hdl_{digest[:12]}"
 

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from typing import Any
-
-import pytest
-
-from context_cutter.store import InMemoryStore, RedisStore, get_default_store, set_default_store
+from context_cutter.store import (
+    InMemoryStore,
+    RedisStore,
+    get_default_store,
+    set_default_store,
+)
 
 
 class FakeRedis:
@@ -69,4 +70,3 @@ def test_set_default_store_replaces_global_default() -> None:
         assert get_default_store() is replacement
     finally:
         set_default_store(original)
-
