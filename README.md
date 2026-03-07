@@ -250,7 +250,7 @@ The Tool Search Tool addresses a complementary but distinct problem: schema-leve
 
 [ptc]: https://www.anthropic.com/engineering/advanced-tool-use
 [dynfilter]: https://claude.com/blog/improved-web-search-with-dynamic-filtering
-[tst]: https://www.anthropic.com/engineering/advanced-tool-use
+[tst]: https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool
 [mcpbloat]: https://layered.dev/mcp-tool-schema-bloat-the-hidden-token-tax-and-how-to-fix-it
 [supo]: https://openreview.net/pdf?id=778Yl5j1TE
 [normcode]: https://arxiv.org/abs/2512.10563
