@@ -12,11 +12,11 @@ The result: **86–99% fewer tokens spent on API responses** in typical agent wo
 ## How it works
 
 ```
-┌─────────┐  fetch_json_cutted(url)    ┌──────────────────┐   HTTP GET   ┌─────────────┐
+┌─────────┐   fetch_json_cutted(url)   ┌──────────────────┐   HTTP GET   ┌─────────────┐
 │  Agent  │ ────────────────────────► │  ContextCutter   │ ───────────► │  Remote API │
 │  (LLM)  │                           │   MCP Server     │ ◄─────────── │             │
 │         │ ◄──────────────────────── │  (Rust binary)   │   JSON blob  └─────────────┘
-│         │  { handle_id, teaser }    │                  │
+│         │   { handle_id, teaser }   │                  │
 │         │                           │  DashMap store   │
 │         │   query_handle(id, path)  │  (in-memory)     │
 │         │ ────────────────────────► │                  │
