@@ -34,7 +34,7 @@ jobs:
         run: cargo clippy -- -D warnings
 
       - name: Ruff
-        run: ruff check python/ tests/ --exit-zero
+        run: ruff check python/ tests/
 
   test-matrix:
     runs-on: ubuntu-latest
@@ -54,7 +54,13 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install project (dev)
+      - name: Install maturin
+        run: python -m pip install maturin
+
+      - name: Build Rust extension
+        run: maturin develop --features python
+
+      - name: Install dev dependencies
         run: python -m pip install -e ".[dev]"
 
       - name: Run Rust tests
