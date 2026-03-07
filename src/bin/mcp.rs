@@ -232,7 +232,10 @@ impl ContextCutterServer {
                         Ok(r) => read_response_with_limit(r, max_bytes),
                         // Non-2xx: still try to read the body — it may contain useful JSON.
                         Err(ureq::Error::Status(code, r)) => {
-                            info!(status = code, "received non-2xx response; attempting body parse");
+                            info!(
+                                status = code,
+                                "received non-2xx response; attempting body parse"
+                            );
                             read_response_with_limit(r, max_bytes)
                         }
                         Err(e) => Err(ContextCutterError::RequestFailed(e.to_string())),
@@ -253,7 +256,10 @@ impl ContextCutterServer {
             let teaser: serde_json::Value =
                 serde_json::from_str(&teaser_str).unwrap_or(serde_json::Value::Null);
 
-            info!(handle_id = handle_id.as_str(), "stored fetched JSON payload");
+            info!(
+                handle_id = handle_id.as_str(),
+                "stored fetched JSON payload"
+            );
 
             let out = serde_json::json!({
                 "handle_id": handle_id,
