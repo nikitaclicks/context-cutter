@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Union
 
 from context_cutter import query_handle
 
@@ -19,7 +19,7 @@ class FinalAnswer:
     value: Any
 
 
-Action = ToolCall | FinalAnswer
+Action = Union[ToolCall, FinalAnswer]
 Planner = Callable[[list[dict[str, Any]], list[Exception]], Action]
 
 
