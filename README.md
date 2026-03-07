@@ -223,6 +223,39 @@ Operation latencies (median, on commodity hardware):
 
 Throughput: ~10,000–27,000 operations/second per operation type.
 
+## Prior art & related work
+
+The problem of tool-result context bloat is well-recognized across the AI engineering community and is being addressed from several directions. The table below situates ContextCutter among the most relevant approaches at the mechanism level.
+
+### Comparison with Anthropic's built-in mitigations
+
+| Approach | Who executes filtering | Model must write code? | Requires sandbox? | Scope |
+|---|---|---|---|---|
+| **ContextCutter** | Rust MCP proxy — intercepts before the model sees anything | No | No | Any HTTPS JSON API |
+| [**Programmatic Tool Calling**][ptc] (Nov 2025) | Model writes Python; runs in Anthropic's Code Execution sandbox | Yes | Yes | Any tool registered with `allowed_callers` |
+| [**Web Search Dynamic Filtering**][dynfilter] (Feb 2026) | Model writes Python; runs in Anthropic's Code Execution sandbox | Yes | Yes | Web search / web fetch tools only |
+| [**Tool Search Tool**][tst] (Nov 2025) | Host-side deferred loading | No | No | Tool *schema definitions* — a different problem |
+
+Programmatic Tool Calling and Dynamic Filtering pursue the same goal — keeping intermediate data out of the context window — by letting the model generate filtering code executed in a sandboxed environment. Anthropic reports a 37% token reduction (PTC on complex research tasks) and a 24% token reduction with 11% accuracy improvement (Dynamic Filtering on web search benchmarks). ContextCutter achieves 86–99% savings by intercepting at the transport layer before any model inference, with no code generation or sandbox dependency.
+
+The Tool Search Tool addresses a complementary but distinct problem: schema-level bloat from large tool libraries (one measured case: 106 MySQL tools → 54,600 tokens of schema before a single query [[Layered.dev, 2026]][mcpbloat]). ContextCutter and Tool Search Tool can be used together.
+
+### Research context
+
+- **SUPO — Summarization-augmented Policy Optimization** (ICLR 2026, under review): trains LLM agents via RL to periodically compress tool-use history with LLM-generated summaries, enabling long-horizon tasks beyond a fixed context limit. Related problem (context overflow from sequential tool results) but a learned, fine-tuning-based approach rather than a deterministic proxy. [[arXiv preprint]][supo]
+
+- **NormCode** (arXiv 2512.10563, Dec 2025): a semi-formal language for context-isolated AI planning where each step receives only explicitly-passed inputs, eliminating cross-step contamination by construction. Operates at the workflow-language level rather than the transport layer. [[arXiv]][normcode]
+
+- **Unified Tool Integration for LLMs** (arXiv 2508.02979, Aug 2025): a protocol-agnostic function-calling framework with automated schema generation and dual-mode concurrent execution, reporting 60–80% code reduction across integration scenarios. [[arXiv]][unified]
+
+[ptc]: https://www.anthropic.com/engineering/advanced-tool-use
+[dynfilter]: https://claude.com/blog/improved-web-search-with-dynamic-filtering
+[tst]: https://www.anthropic.com/engineering/advanced-tool-use
+[mcpbloat]: https://layered.dev/mcp-tool-schema-bloat-the-hidden-token-tax-and-how-to-fix-it
+[supo]: https://openreview.net/pdf?id=778Yl5j1TE
+[normcode]: https://arxiv.org/abs/2512.10563
+[unified]: https://arxiv.org/abs/2508.02979
+
 ## Development
 
 ```bash
