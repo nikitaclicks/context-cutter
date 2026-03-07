@@ -1,7 +1,7 @@
 # ContextCutter
 
 [![Tests](https://github.com/nikitaclicks/context-cutter/actions/workflows/tests.yml/badge.svg)](https://github.com/nikitaclicks/context-cutter/actions/workflows/tests.yml)
-[![codecov](https://codecov.io/gh/nikitaclicks/context-cutter/branch/main/graph/badge.svg)](https://codecov.io/gh/nikitaclicks/context-cutter)
+[![codecov](https://codecov.io/gh/nikitaclicks/context-cutter/branch/main/graph/badge.svg?token=CWZ325CM08)](https://codecov.io/gh/nikitaclicks/context-cutter)
 
 **Stop feeding entire API responses to your LLM. Give it a handle instead.**
 
