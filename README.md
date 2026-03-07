@@ -2,10 +2,6 @@
 
 [![Tests](https://github.com/nikitaclicks/context-cutter/actions/workflows/tests.yml/badge.svg)](https://github.com/nikitaclicks/context-cutter/actions/workflows/tests.yml)
 [![codecov](https://codecov.io/gh/nikitaclicks/context-cutter/branch/main/graph/badge.svg)](https://codecov.io/gh/nikitaclicks/context-cutter)
-[![Crates.io](https://img.shields.io/crates/v/context-cutter.svg)](https://crates.io/crates/context-cutter)
-[![PyPI](https://img.shields.io/pypi/v/context-cutter.svg)](https://pypi.org/project/context-cutter)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io-blue)](https://ghcr.io/nikitaclicks/context-cutter-mcp)
-[![npm](https://img.shields.io/npm/v/context-cutter-mcp.svg)](https://www.npmjs.com/package/context-cutter-mcp)
 
 **Stop feeding entire API responses to your LLM. Give it a handle instead.**
 
@@ -16,7 +12,7 @@ The result: **86–99% fewer tokens spent on API responses** in typical agent wo
 ## How it works
 
 ```
-┌─────────┐   fetch_json_cutted(url)   ┌──────────────────┐   HTTP GET   ┌─────────────┐
+┌─────────┐  fetch_json_cutted(url)    ┌──────────────────┐   HTTP GET   ┌─────────────┐
 │  Agent  │ ────────────────────────► │  ContextCutter   │ ───────────► │  Remote API │
 │  (LLM)  │                           │   MCP Server     │ ◄─────────── │             │
 │         │ ◄──────────────────────── │  (Rust binary)   │   JSON blob  └─────────────┘
