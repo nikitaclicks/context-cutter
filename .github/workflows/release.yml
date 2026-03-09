@@ -160,6 +160,7 @@ jobs:
 
       - name: Publish to PyPI
         env:
+          MATURIN_USERNAME: __token__
           MATURIN_PASSWORD: ${{ secrets.PYPI_TOKEN }}
         run: maturin publish --non-interactive
 
