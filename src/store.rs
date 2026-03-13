@@ -296,6 +296,41 @@ mod tests {
         assert_eq!(store.get("h3"), Some(json!({"n": 3})));
     }
 
+    #[test]
+    fn local_store_get_returns_none_for_missing_key() {
+        let store = GlobalStore::new_with_config(StoreConfig {
+            max_handles: 10,
+            ttl: Duration::from_secs(60),
+        });
+        assert!(store.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn local_store_expires_entries_on_get() {
+        let store = GlobalStore::new_with_config(StoreConfig {
+            max_handles: 10,
+            ttl: Duration::from_millis(1),
+        });
+        store.insert("h_expire".to_string(), json!({"x": 99}));
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(
+            store.get("h_expire").is_none(),
+            "entry should be expired and removed on get"
+        );
+    }
+
+    #[test]
+    fn local_store_sweep_expired_removes_old_entries() {
+        let store = GlobalStore::new_with_config(StoreConfig {
+            max_handles: 10,
+            ttl: Duration::from_millis(1),
+        });
+        store.insert("h_sweep".to_string(), json!({"y": 1}));
+        std::thread::sleep(Duration::from_millis(5));
+        store.sweep_expired();
+        assert!(store.get("h_sweep").is_none());
+    }
+
     #[cfg(feature = "python")]
     #[test]
     fn context_store_basic_operations() {

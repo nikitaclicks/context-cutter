@@ -268,4 +268,79 @@ mod tests {
         let out = query_json_path(&payload, "$.items[*]").expect("query should succeed");
         assert_eq!(out, "[1,2,3]");
     }
+
+    #[test]
+    fn normalize_json_path_rejects_null_bytes() {
+        let path_with_null = "$.foo\x00bar";
+        let err = normalize_json_path(path_with_null).expect_err("null bytes should fail");
+        assert!(err.to_string().contains("null bytes"));
+    }
+
+    #[test]
+    fn normalize_json_path_rejects_too_long_path() {
+        let long_path = "$".repeat(MAX_JSON_PATH_LEN + 1);
+        let err = normalize_json_path(&long_path).expect_err("too-long path should fail");
+        assert!(err.to_string().contains("too long"));
+    }
+
+    #[test]
+    fn normalize_json_path_preserves_existing_dollar_prefix() {
+        let path = "$.contributors[0].login";
+        let normalized = normalize_json_path(path).expect("already-normalized path should pass");
+        assert_eq!(normalized, path);
+    }
+
+    #[test]
+    fn generate_teaser_from_value_for_array_payload() {
+        let payload = json!([{"login": "octocat"}, {"login": "hubot"}]);
+        let teaser: serde_json::Value =
+            serde_json::from_str(&generate_teaser_from_value(&payload))
+                .expect("teaser must be valid JSON");
+        assert_eq!(teaser["_teaser"], json!(true));
+        assert_eq!(teaser["_type"], json!("Array[2]"));
+    }
+
+    #[test]
+    fn generate_teaser_from_value_for_scalar_payload() {
+        let payload = json!(42);
+        let teaser: serde_json::Value =
+            serde_json::from_str(&generate_teaser_from_value(&payload))
+                .expect("teaser must be valid JSON");
+        assert_eq!(teaser["_teaser"], json!(true));
+        assert_eq!(teaser["_type"], json!("int"));
+    }
+
+    #[test]
+    fn generate_teaser_from_value_for_empty_array() {
+        let payload = json!([]);
+        let teaser: serde_json::Value =
+            serde_json::from_str(&generate_teaser_from_value(&payload))
+                .expect("teaser must be valid JSON");
+        assert_eq!(teaser["_teaser"], json!(true));
+        assert_eq!(teaser["structure"], json!("Array[0]"));
+    }
+
+    #[test]
+    fn query_json_path_rejects_empty_path() {
+        let payload = json!({"x": 1});
+        let err = query_json_path(&payload, "").expect_err("empty path should fail");
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn summarize_at_max_depth_truncates_lists_and_scalars() {
+        // Build a nested payload that forces depth >= MAX_DEPTH on inner values.
+        let payload = json!({
+            "a": {
+                "b": {
+                    "c": [1, 2, 3]
+                }
+            }
+        });
+        let teaser: serde_json::Value =
+            serde_json::from_str(&generate_teaser_from_value(&payload))
+                .expect("teaser must be valid JSON");
+        // At depth MAX_DEPTH the list should be rendered as "Array[3]" string.
+        assert_eq!(teaser["structure"]["a"]["b"]["c"], json!("Array[3]"));
+    }
 }
