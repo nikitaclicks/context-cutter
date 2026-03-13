@@ -129,4 +129,59 @@ mod tests {
         assert_eq!(teaser["_teaser"], json!(true));
         assert_eq!(teaser["_type"], json!("object"));
     }
+
+    #[test]
+    fn engine_store_rejects_null_bytes() {
+        let json_with_null = "{\x00\"a\": 1}";
+        let err = engine_store(json_with_null).expect_err("null bytes should fail");
+        assert!(err.to_string().contains("null bytes"));
+    }
+
+    #[test]
+    fn engine_store_rejects_invalid_json() {
+        let err = engine_store("{not valid json}").expect_err("invalid json should fail");
+        assert!(err.to_string().contains("invalid JSON"));
+    }
+
+    #[test]
+    fn engine_teaser_rejects_empty_handle_id() {
+        let err = engine_teaser("   ").expect_err("empty handle_id should fail");
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn engine_teaser_returns_error_for_unknown_handle() {
+        let err = engine_teaser("hdl_nonexistent").expect_err("unknown handle should fail");
+        assert!(err.to_string().contains("unknown handle_id"));
+    }
+
+    #[test]
+    fn engine_query_rejects_empty_handle_id() {
+        let err = engine_query("", "$.x").expect_err("empty handle_id should fail");
+        assert!(err.to_string().contains("empty"));
+    }
+
+    #[test]
+    fn engine_query_returns_error_for_unknown_handle() {
+        let err =
+            engine_query("hdl_doesnotexist_xyz", "$.x").expect_err("unknown handle should fail");
+        assert!(err.to_string().contains("unknown handle_id"));
+    }
+
+    #[test]
+    fn canonicalize_json_value_handles_arrays() {
+        let value = json!([{"b": 2, "a": 1}, {"y": 9, "x": 8}]);
+        let canonical = canonicalize_json_value(&value);
+        // Object keys inside arrays should be sorted.
+        if let Value::Array(arr) = &canonical {
+            if let Value::Object(obj) = &arr[0] {
+                let keys: Vec<&String> = obj.keys().collect();
+                assert_eq!(keys, vec!["a", "b"]);
+            } else {
+                panic!("expected object in array");
+            }
+        } else {
+            panic!("expected array");
+        }
+    }
 }

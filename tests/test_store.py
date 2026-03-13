@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from context_cutter.store import (
     InMemoryStore,
     RedisStore,
@@ -60,6 +62,45 @@ def test_redis_store_with_injected_client() -> None:
     assert store.len() == 1
     assert store.delete("h1") is True
     assert store.exists("h1") is False
+
+
+def test_redis_store_get_returns_none_for_missing_key() -> None:
+    fake = FakeRedis()
+    store = RedisStore(redis_client=fake, key_prefix="cc:")
+    assert store.get("not_here") is None
+
+
+def test_redis_store_clear_removes_all_entries() -> None:
+    fake = FakeRedis()
+    store = RedisStore(redis_client=fake, key_prefix="cc:")
+    store.set("a", {"x": 1})
+    store.set("b", {"y": 2})
+    assert store.len() == 2
+    store.clear()
+    assert store.len() == 0
+    assert store.get("a") is None
+
+
+def test_redis_store_raises_when_redis_not_importable() -> None:
+    import sys
+    import unittest.mock as mock
+
+    with mock.patch.dict(sys.modules, {"redis": None}):
+        with pytest.raises(ModuleNotFoundError, match="redis package is required"):
+            RedisStore()
+
+
+def test_redis_store_uses_from_url_when_no_client_provided() -> None:
+    import sys
+    import unittest.mock as mock
+
+    fake_redis_module = mock.MagicMock()
+    with mock.patch.dict(sys.modules, {"redis": fake_redis_module}):
+        store = RedisStore(redis_url="redis://fake-host:6379/0")
+        fake_redis_module.Redis.from_url.assert_called_once_with(
+            "redis://fake-host:6379/0", decode_responses=True
+        )
+        assert store is not None
 
 
 def test_set_default_store_replaces_global_default() -> None:

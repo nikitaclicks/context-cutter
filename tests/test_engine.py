@@ -117,3 +117,25 @@ def test_context_store_round_trip_operations() -> None:
     assert store.len() == 1
     store.clear()
     assert store.len() == 0
+
+
+def test_generate_teaser_with_custom_store() -> None:
+    store = InMemoryStore()
+    handle = store_response({"a": 1, "b": [1, 2]}, store=store)
+    teaser = json.loads(generate_teaser(handle, store=store))
+    assert teaser["_teaser"] is True
+    assert teaser["_type"] == "object"
+    assert "a" in teaser["keys"]
+
+
+def test_generate_teaser_with_custom_store_unknown_handle_raises() -> None:
+    store = InMemoryStore()
+    with pytest.raises(KeyError):
+        generate_teaser("hdl_missing", store=store)
+
+
+def test_query_path_with_custom_store() -> None:
+    store = InMemoryStore()
+    handle = store_response({"items": [10, 20, 30]}, store=store)
+    result = query_path(handle, "$.items[1]", store=store)
+    assert json.loads(result) == 20
