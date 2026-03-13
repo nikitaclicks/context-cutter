@@ -62,3 +62,30 @@ def test_lazy_tool_rejects_unsupported_type() -> None:
 def test_lazy_tool_preserves_metadata() -> None:
     assert dict_payload_tool.__name__ == "dict_payload_tool"
     assert dict_payload_tool.__doc__ == "Return a sample dictionary payload."
+
+
+def test_lazy_handle_with_custom_store() -> None:
+    store = InMemoryStore()
+
+    @lazy_handle(store=store)
+    def my_tool() -> dict[str, object]:
+        return {"key": "value", "nums": [1, 2, 3]}
+
+    result = my_tool()
+    assert set(result.keys()) == {"handle_id", "teaser"}
+    assert result["handle_id"].startswith("hdl_")
+    assert result["teaser"]["_teaser"] is True
+    # The payload should be in the custom store, not the default store.
+    assert store.get(result["handle_id"]) is not None
+
+
+def test_lazy_handle_factory_form_returns_decorator() -> None:
+    store = InMemoryStore()
+
+    @lazy_handle(store=store)
+    def list_tool() -> list[object]:
+        return [{"id": 1}, {"id": 2}]
+
+    result = list_tool()
+    assert result["teaser"]["_teaser"] is True
+    assert "Array" in result["teaser"]["_type"]
