@@ -105,6 +105,13 @@ struct Args {
     /// Example: --proxy-header "Authorization: Bearer $TOKEN"
     #[arg(long)]
     proxy_header: Vec<String>,
+
+    /// Path to a file containing a Bearer token for the upstream MCP server.
+    /// The file is re-read on every request, so token refreshes work automatically.
+    /// Claude Code saves tokens to ~/.claude/<server-name>-token after OAuth login.
+    /// Example: --proxy-token-file ~/.claude/clickup-status-token
+    #[arg(long)]
+    proxy_token_file: Option<String>,
 }
 
 fn read_response_with_limit(
@@ -153,6 +160,25 @@ fn boundary_error(err: ContextCutterError) -> String {
 }
 
 // ─── Proxy helpers ────────────────────────────────────────────────────────────
+
+/// Expand a leading `~` to the user's home directory.
+fn expand_tilde(path: &str) -> std::path::PathBuf {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return std::path::PathBuf::from(home).join(rest);
+        }
+    }
+    std::path::PathBuf::from(path)
+}
+
+/// Read a Bearer token from a file, trimming whitespace.
+/// Returns None if the file doesn't exist or can't be read.
+fn read_token_file(path: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
 
 /// Parse `--proxy-header` strings of the form `"Key: Value"` into pairs.
 fn parse_proxy_headers(raw: &[String]) -> Result<Vec<(String, String)>, String> {
@@ -251,6 +277,7 @@ struct ProxyServer {
     threshold: usize,
     upstream_tools: Arc<Vec<Tool>>,
     next_id: Arc<AtomicU64>,
+    token_file: Option<std::path::PathBuf>,
 }
 
 impl ProxyServer {
@@ -259,6 +286,7 @@ impl ProxyServer {
         upstream_headers: Vec<(String, String)>,
         threshold: usize,
         upstream_tools: Vec<Tool>,
+        token_file: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
             upstream_url,
@@ -266,6 +294,7 @@ impl ProxyServer {
             threshold,
             upstream_tools: Arc::new(upstream_tools),
             next_id: Arc::new(AtomicU64::new(3)), // 1 and 2 used at init
+            token_file,
         }
     }
 
@@ -278,6 +307,19 @@ impl ProxyServer {
         let mut tools = (*self.upstream_tools).clone();
         tools.push(query_handle_tool_def());
         tools
+    }
+
+    /// Build the full headers for an upstream call, injecting the Bearer token
+    /// from the token file if present. Re-reads the file on every call so that
+    /// token refreshes (e.g. after re-authentication via /mcp) work automatically.
+    fn upstream_headers(&self) -> Vec<(String, String)> {
+        let mut headers = (*self.upstream_headers).clone();
+        if let Some(ref path) = self.token_file {
+            if let Some(token) = read_token_file(path) {
+                headers.push(("Authorization".to_string(), format!("Bearer {token}")));
+            }
+        }
+        headers
     }
 }
 
@@ -315,9 +357,17 @@ async fn init_proxy_server(
     upstream_url: &str,
     headers: &[(String, String)],
     threshold: usize,
+    token_file: Option<std::path::PathBuf>,
 ) -> Result<ProxyServer, ContextCutterError> {
     let url = upstream_url.to_string();
-    let hdrs = headers.to_vec();
+
+    // Build the initial headers including token (for the handshake calls).
+    let mut hdrs = headers.to_vec();
+    if let Some(ref path) = token_file {
+        if let Some(token) = read_token_file(path) {
+            hdrs.push(("Authorization".to_string(), format!("Bearer {token}")));
+        }
+    }
 
     // Step 1: initialize
     let _init_result = tokio::task::spawn_blocking({
@@ -363,7 +413,8 @@ async fn init_proxy_server(
 
     info!(tool_count = upstream_tools.len(), "upstream tools discovered");
 
-    Ok(ProxyServer::new(url, hdrs, threshold, upstream_tools))
+    // Store only the extra headers (not the token) — token is re-read per-request.
+    Ok(ProxyServer::new(url, headers.to_vec(), threshold, upstream_tools, token_file))
 }
 
 // ─── ServerHandler for ProxyServer ───────────────────────────────────────────
@@ -419,7 +470,7 @@ impl ServerHandler for ProxyServer {
 
             // ── Forward to upstream ────────────────────────────────────────────
             let url = self.upstream_url.clone();
-            let headers = (*self.upstream_headers).clone();
+            let headers = self.upstream_headers(); // re-reads token file each call
             let id = self.next_id();
             let threshold = self.threshold;
             let arguments = request
@@ -839,6 +890,7 @@ async fn run_proxy_mode(
     upstream_url: &str,
     threshold: usize,
     raw_headers: &[String],
+    token_file_arg: Option<&str>,
 ) {
     let headers = match parse_proxy_headers(raw_headers) {
         Ok(h) => h,
@@ -848,6 +900,8 @@ async fn run_proxy_mode(
         }
     };
 
+    let token_file = token_file_arg.map(expand_tilde);
+
     if !upstream_url.starts_with("https://") && !is_localhost_proxy_url(upstream_url) {
         eprintln!(
             "context-cutter-mcp: --proxy URL must use https:// \
@@ -856,11 +910,22 @@ async fn run_proxy_mode(
         std::process::exit(1);
     }
 
+    if let Some(ref path) = token_file {
+        if !path.exists() {
+            eprintln!(
+                "context-cutter-mcp: --proxy-token-file not found: {}",
+                path.display()
+            );
+            std::process::exit(1);
+        }
+        info!(path = %path.display(), "using token file for upstream auth");
+    }
+
     info!(upstream_url, threshold, "starting proxy mode");
 
     start_background_sweeper();
 
-    let proxy_server = match init_proxy_server(upstream_url, &headers, threshold).await {
+    let proxy_server = match init_proxy_server(upstream_url, &headers, threshold, token_file).await {
         Ok(s) => s,
         Err(e) => {
             error!(error = %e, "failed to initialise upstream MCP");
@@ -907,7 +972,13 @@ async fn main() {
     let args = Args::parse();
 
     if let Some(ref upstream_url) = args.proxy {
-        run_proxy_mode(upstream_url, args.proxy_threshold, &args.proxy_header).await;
+        run_proxy_mode(
+            upstream_url,
+            args.proxy_threshold,
+            &args.proxy_header,
+            args.proxy_token_file.as_deref(),
+        )
+        .await;
     } else {
         run_normal_mode().await;
     }
