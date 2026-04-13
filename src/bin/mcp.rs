@@ -26,7 +26,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn};
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_MAX_PAYLOAD_BYTES: usize = 10 * 1024 * 1024;
@@ -180,6 +180,358 @@ fn read_token_file(path: &std::path::Path) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+// ─── OAuth helpers ────────────────────────────────────────────────────────────
+
+/// Read `n` cryptographically random bytes from /dev/urandom.
+fn random_bytes(n: usize) -> Vec<u8> {
+    let mut buf = vec![0u8; n];
+    if let Ok(mut f) = std::fs::File::open("/dev/urandom") {
+        let _ = f.read_exact(&mut buf);
+    }
+    buf
+}
+
+/// Base64url encode without padding (RFC 4648 §5, used for PKCE).
+fn base64url_encode(input: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
+        let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
+        out.push(CHARS[b0 >> 2] as char);
+        out.push(CHARS[((b0 & 3) << 4) | (b1 >> 4)] as char);
+        if chunk.len() > 1 { out.push(CHARS[((b1 & 15) << 2) | (b2 >> 6)] as char); }
+        if chunk.len() > 2 { out.push(CHARS[b2 & 63] as char); }
+    }
+    out
+}
+
+/// Decode base64 / base64url with optional padding.
+fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    let decode_char = |c: u8| -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' | b'-' => Some(62),
+            b'/' | b'_' => Some(63),
+            b'=' => Some(0),
+            _ => None,
+        }
+    };
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        let a = decode_char(chunk[0])?;
+        let b = decode_char(*chunk.get(1).unwrap_or(&b'='))?;
+        let c = decode_char(*chunk.get(2).unwrap_or(&b'='))?;
+        let d = decode_char(*chunk.get(3).unwrap_or(&b'='))?;
+        out.push((a << 2) | (b >> 4));
+        if chunk.get(2).filter(|&&x| x != b'=').is_some() { out.push((b << 4) | (c >> 2)); }
+        if chunk.get(3).filter(|&&x| x != b'=').is_some() { out.push((c << 6) | d); }
+    }
+    Some(out)
+}
+
+/// Returns true if the JWT `exp` claim is in the past, or if the token is unparseable.
+fn is_jwt_expired(token: &str) -> bool {
+    let payload = token.split('.').nth(1).unwrap_or("");
+    let decoded = base64url_decode(payload).unwrap_or_default();
+    let json: serde_json::Value = serde_json::from_slice(&decoded).unwrap_or(serde_json::Value::Null);
+    let exp = json.get("exp").and_then(|v| v.as_u64()).unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    exp == 0 || now >= exp
+}
+
+/// Percent-encode a string for use in query parameters.
+fn url_encode(s: &str) -> String {
+    s.bytes()
+        .flat_map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                vec![b as char]
+            } else {
+                format!("%{b:02X}").chars().collect::<Vec<_>>()
+            }
+        })
+        .collect()
+}
+
+struct OAuthMeta {
+    authorization_endpoint: String,
+    token_endpoint: String,
+    registration_endpoint: Option<String>,
+}
+
+/// Fetch OAuth server metadata from `<base_url>/.well-known/oauth-authorization-server`.
+fn fetch_oauth_meta_sync(base_url: &str) -> Result<OAuthMeta, ContextCutterError> {
+    let url = format!("{base_url}/.well-known/oauth-authorization-server");
+    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10)).build();
+    let body = agent.get(&url).call()
+        .map_err(|e| ContextCutterError::RequestFailed(format!("OAuth discovery failed: {e}")))?
+        .into_string()
+        .map_err(|e| ContextCutterError::RequestFailed(format!("OAuth discovery read: {e}")))?;
+    let json: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| ContextCutterError::InvalidJson(format!("OAuth discovery JSON: {e}")))?;
+    Ok(OAuthMeta {
+        authorization_endpoint: json["authorization_endpoint"].as_str()
+            .ok_or_else(|| ContextCutterError::RequestFailed("OAuth: missing authorization_endpoint".into()))?
+            .to_string(),
+        token_endpoint: json["token_endpoint"].as_str()
+            .ok_or_else(|| ContextCutterError::RequestFailed("OAuth: missing token_endpoint".into()))?
+            .to_string(),
+        registration_endpoint: json["registration_endpoint"].as_str().map(String::from),
+    })
+}
+
+/// Dynamically register a public OAuth client, returning the assigned client_id.
+fn register_oauth_client_sync(reg_endpoint: &str, redirect_uri: &str) -> Result<String, ContextCutterError> {
+    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10)).build();
+    let body = serde_json::json!({
+        "client_name": "context-cutter-proxy",
+        "redirect_uris": [redirect_uri],
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none",
+    })
+    .to_string();
+    let resp_str = agent.post(reg_endpoint)
+        .set("Content-Type", "application/json")
+        .send_string(&body)
+        .map_err(|e| ContextCutterError::RequestFailed(format!("client registration failed: {e}")))?
+        .into_string()
+        .map_err(|e| ContextCutterError::RequestFailed(e.to_string()))?;
+    let json: serde_json::Value = serde_json::from_str(&resp_str)
+        .map_err(|e| ContextCutterError::InvalidJson(e.to_string()))?;
+    json["client_id"].as_str()
+        .map(String::from)
+        .ok_or_else(|| ContextCutterError::RequestFailed(
+            format!("client registration: missing client_id in: {resp_str}")
+        ))
+}
+
+/// Exchange an authorization code for an access token using PKCE.
+fn exchange_code_sync(
+    token_endpoint: &str,
+    code: &str,
+    client_id: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+) -> Result<String, ContextCutterError> {
+    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(15)).build();
+    let body = format!(
+        "grant_type=authorization_code&code={}&client_id={}&code_verifier={}&redirect_uri={}",
+        url_encode(code),
+        url_encode(client_id),
+        url_encode(code_verifier),
+        url_encode(redirect_uri),
+    );
+    let resp_str = agent.post(token_endpoint)
+        .set("Content-Type", "application/x-www-form-urlencoded")
+        .send_string(&body)
+        .map_err(|e| ContextCutterError::RequestFailed(format!("token exchange failed: {e}")))?
+        .into_string()
+        .map_err(|e| ContextCutterError::RequestFailed(e.to_string()))?;
+    let json: serde_json::Value = serde_json::from_str(&resp_str)
+        .map_err(|e| ContextCutterError::InvalidJson(e.to_string()))?;
+    json["access_token"].as_str()
+        .map(String::from)
+        .ok_or_else(|| ContextCutterError::RequestFailed(
+            format!("token exchange: missing access_token (response: {resp_str})")
+        ))
+}
+
+/// Start a one-shot local HTTP server, wait for the OAuth callback, and return the `code`.
+async fn wait_for_oauth_callback(
+    listener: tokio::net::TcpListener,
+) -> Result<String, ContextCutterError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut stream, _) = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        listener.accept(),
+    )
+    .await
+    .map_err(|_| ContextCutterError::RequestFailed("OAuth: timed out waiting for browser login (5 min)".into()))?
+    .map_err(|e| ContextCutterError::RequestFailed(format!("OAuth callback accept: {e}")))?;
+
+    let mut buf = [0u8; 8192];
+    let n = stream.read(&mut buf).await
+        .map_err(|e| ContextCutterError::RequestFailed(format!("OAuth callback read: {e}")))?;
+
+    // Parse code from "GET /callback?code=xxx&state=yyy HTTP/1.1"
+    let request = String::from_utf8_lossy(&buf[..n]);
+    let first_line = request.lines().next().unwrap_or("");
+    let path = first_line.split_whitespace().nth(1).unwrap_or("");
+    let query = path.split_once('?').map(|(_, q)| q).unwrap_or("");
+
+    let mut code = String::new();
+    for param in query.split('&') {
+        if let Some(v) = param.strip_prefix("code=") {
+            code = v.to_string();
+            break;
+        }
+    }
+
+    // Respond with a success page so the browser doesn't hang.
+    let _ = stream.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
+          <html><body style='font-family:sans-serif;text-align:center;padding:60px'>\
+          <h2>\xe2\x9c\x93 Authentication successful</h2>\
+          <p>You can close this tab and return to Claude.</p>\
+          </body></html>",
+    )
+    .await;
+
+    if code.is_empty() {
+        return Err(ContextCutterError::RequestFailed(
+            "OAuth callback: missing `code` parameter".into(),
+        ));
+    }
+    Ok(code)
+}
+
+/// Run the full OAuth 2.0 + PKCE browser flow, save the token, and return it.
+async fn run_oauth_flow(
+    upstream_url: &str,
+    token_file: &std::path::Path,
+) -> Result<String, ContextCutterError> {
+    // Derive base URL (scheme + host only).
+    let base_url = {
+        let after_scheme = upstream_url.find("://").map(|i| i + 3).unwrap_or(0);
+        let host_end = upstream_url[after_scheme..]
+            .find('/')
+            .map(|i| i + after_scheme)
+            .unwrap_or(upstream_url.len());
+        upstream_url[..host_end].to_string()
+    };
+
+    // Discover OAuth endpoints.
+    let meta = tokio::task::spawn_blocking({
+        let base = base_url.clone();
+        move || fetch_oauth_meta_sync(&base)
+    })
+    .await
+    .map_err(|e| ContextCutterError::Internal(format!("spawn_blocking: {e}")))?
+    .map_err(|e| ContextCutterError::RequestFailed(format!("OAuth discovery: {e}")))?;
+
+    // Bind local callback server on a random port.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await
+        .map_err(|e| ContextCutterError::RequestFailed(format!("callback server: {e}")))?;
+    let port = listener.local_addr()
+        .map_err(|e| ContextCutterError::RequestFailed(format!("callback port: {e}")))?
+        .port();
+    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+
+    // Register a public client to get a client_id.
+    let client_id = if let Some(ref reg_ep) = meta.registration_endpoint {
+        let ep = reg_ep.clone();
+        let ru = redirect_uri.clone();
+        tokio::task::spawn_blocking(move || register_oauth_client_sync(&ep, &ru))
+            .await
+            .map_err(|e| ContextCutterError::Internal(e.to_string()))??
+    } else {
+        "context-cutter-proxy".to_string()
+    };
+
+    // Generate PKCE code verifier + S256 challenge.
+    let code_verifier = base64url_encode(&random_bytes(32));
+    let code_challenge = {
+        use sha2::{Digest, Sha256};
+        base64url_encode(&Sha256::digest(code_verifier.as_bytes()).to_vec())
+    };
+    let state = base64url_encode(&random_bytes(16));
+
+    // Build authorization URL.
+    let auth_url = format!(
+        "{}?client_id={}&response_type=code&redirect_uri={}&scope=read+write\
+         &state={}&code_challenge={}&code_challenge_method=S256",
+        meta.authorization_endpoint,
+        url_encode(&client_id),
+        url_encode(&redirect_uri),
+        url_encode(&state),
+        url_encode(&code_challenge),
+    );
+
+    // Open browser. Fall back to printing the URL if `open` isn't available.
+    eprintln!("\n[context-cutter] Authentication required for upstream MCP.");
+    let opened = std::process::Command::new("open").arg(&auth_url).spawn().is_ok();
+    if !opened {
+        eprintln!("[context-cutter] Could not open browser automatically.");
+    }
+    eprintln!("[context-cutter] Open this URL to authenticate:\n\n  {auth_url}\n");
+
+    // Wait for the browser to complete the OAuth flow.
+    info!(port, "waiting for OAuth callback");
+    let code = wait_for_oauth_callback(listener).await?;
+
+    // Exchange authorization code for access token.
+    let token = {
+        let te = meta.token_endpoint.clone();
+        let ci = client_id.clone();
+        let cv = code_verifier.clone();
+        let ru = redirect_uri.clone();
+        let c = code.clone();
+        tokio::task::spawn_blocking(move || exchange_code_sync(&te, &c, &ci, &cv, &ru))
+            .await
+            .map_err(|e| ContextCutterError::Internal(e.to_string()))??
+    };
+
+    // Persist token to the same file Claude Code uses.
+    std::fs::write(token_file, &token)
+        .map_err(|e| ContextCutterError::RequestFailed(format!("failed to save token: {e}")))?;
+
+    info!("OAuth flow complete, token saved");
+    eprintln!("[context-cutter] Authentication successful!\n");
+
+    Ok(token)
+}
+
+/// Resolve the Authorization header for upstream calls.
+///
+/// If a token file is configured:
+/// - Returns the stored token if still valid.
+/// - Runs the OAuth browser flow if the token is missing or expired.
+///
+/// Called at proxy startup (init handshake) and before each tool call.
+async fn get_authed_headers(
+    upstream_url: &str,
+    extra_headers: &[(String, String)],
+    token_file: Option<&std::path::Path>,
+) -> Vec<(String, String)> {
+    let mut headers = extra_headers.to_vec();
+    let Some(path) = token_file else { return headers };
+
+    let existing = read_token_file(path);
+    let needs_refresh = existing.as_deref().map(is_jwt_expired).unwrap_or(true);
+
+    let token = if needs_refresh {
+        match run_oauth_flow(upstream_url, path).await {
+            Ok(t) => {
+                info!("OAuth token refreshed");
+                Some(t)
+            }
+            Err(e) => {
+                error!(error = %e, "OAuth flow failed");
+                if existing.is_some() {
+                    warn!("using expired token as fallback");
+                }
+                existing
+            }
+        }
+    } else {
+        existing
+    };
+
+    if let Some(t) = token {
+        headers.push(("Authorization".to_string(), format!("Bearer {t}")));
+    }
+    headers
+}
+
 /// Parse `--proxy-header` strings of the form `"Key: Value"` into pairs.
 fn parse_proxy_headers(raw: &[String]) -> Result<Vec<(String, String)>, String> {
     raw.iter()
@@ -309,17 +661,14 @@ impl ProxyServer {
         tools
     }
 
-    /// Build the full headers for an upstream call, injecting the Bearer token
-    /// from the token file if present. Re-reads the file on every call so that
-    /// token refreshes (e.g. after re-authentication via /mcp) work automatically.
-    fn upstream_headers(&self) -> Vec<(String, String)> {
-        let mut headers = (*self.upstream_headers).clone();
-        if let Some(ref path) = self.token_file {
-            if let Some(token) = read_token_file(path) {
-                headers.push(("Authorization".to_string(), format!("Bearer {token}")));
-            }
-        }
-        headers
+    /// Build headers for an upstream call, refreshing the OAuth token if expired.
+    async fn authed_headers(&self) -> Vec<(String, String)> {
+        get_authed_headers(
+            &self.upstream_url,
+            &self.upstream_headers,
+            self.token_file.as_deref(),
+        )
+        .await
     }
 }
 
@@ -361,13 +710,8 @@ async fn init_proxy_server(
 ) -> Result<ProxyServer, ContextCutterError> {
     let url = upstream_url.to_string();
 
-    // Build the initial headers including token (for the handshake calls).
-    let mut hdrs = headers.to_vec();
-    if let Some(ref path) = token_file {
-        if let Some(token) = read_token_file(path) {
-            hdrs.push(("Authorization".to_string(), format!("Bearer {token}")));
-        }
-    }
+    // Resolve auth headers — triggers OAuth browser flow if token is missing/expired.
+    let hdrs = get_authed_headers(upstream_url, headers, token_file.as_deref()).await;
 
     // Step 1: initialize
     let _init_result = tokio::task::spawn_blocking({
@@ -470,7 +814,7 @@ impl ServerHandler for ProxyServer {
 
             // ── Forward to upstream ────────────────────────────────────────────
             let url = self.upstream_url.clone();
-            let headers = self.upstream_headers(); // re-reads token file each call
+            let headers = self.authed_headers().await; // refreshes token if expired
             let id = self.next_id();
             let threshold = self.threshold;
             let arguments = request
