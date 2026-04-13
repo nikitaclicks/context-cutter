@@ -26,6 +26,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::{Notify, RwLock};
 use tracing::{error, info, instrument, warn};
 use tracing_subscriber::EnvFilter;
 
@@ -622,41 +623,65 @@ struct QueryParams {
 
 // ─── Proxy server ─────────────────────────────────────────────────────────────
 
+/// ProxyServer starts immediately (so Claude Code gets an MCP response right away),
+/// then populates upstream tools asynchronously once OAuth + handshake complete.
 #[derive(Clone)]
 struct ProxyServer {
     upstream_url: String,
     upstream_headers: Arc<Vec<(String, String)>>,
     threshold: usize,
-    upstream_tools: Arc<Vec<Tool>>,
+    /// Populated after upstream init; guarded so list_tools / call_tool can wait.
+    upstream_tools: Arc<RwLock<Vec<Tool>>>,
+    /// Fired once when upstream_tools is populated and the proxy is ready.
+    init_done: Arc<Notify>,
     next_id: Arc<AtomicU64>,
     token_file: Option<std::path::PathBuf>,
 }
 
 impl ProxyServer {
-    fn new(
+    /// Create a server that is ready to accept MCP messages but has no upstream tools yet.
+    /// Call `set_upstream_tools` once the upstream handshake (and OAuth) completes.
+    fn new_pending(
         upstream_url: String,
         upstream_headers: Vec<(String, String)>,
         threshold: usize,
-        upstream_tools: Vec<Tool>,
         token_file: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
             upstream_url,
             upstream_headers: Arc::new(upstream_headers),
             threshold,
-            upstream_tools: Arc::new(upstream_tools),
-            next_id: Arc::new(AtomicU64::new(3)), // 1 and 2 used at init
+            upstream_tools: Arc::new(RwLock::new(Vec::new())),
+            init_done: Arc::new(Notify::new()),
+            next_id: Arc::new(AtomicU64::new(3)),
             token_file,
         }
+    }
+
+    /// Populate upstream tools and signal readiness. Called once after OAuth + tools/list.
+    async fn set_upstream_tools(&self, tools: Vec<Tool>) {
+        *self.upstream_tools.write().await = tools;
+        self.init_done.notify_waiters();
     }
 
     fn next_id(&self) -> u64 {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// Returns upstream tools combined with the local query_handle tool.
-    fn all_tools(&self) -> Vec<Tool> {
-        let mut tools = (*self.upstream_tools).clone();
+    /// Wait until the upstream handshake is done, then return all tools.
+    async fn ready_tools(&self) -> Vec<Tool> {
+        // Fast path: already initialised.
+        {
+            let tools = self.upstream_tools.read().await;
+            if !tools.is_empty() {
+                let mut out = tools.clone();
+                out.push(query_handle_tool_def());
+                return out;
+            }
+        }
+        // Slow path: wait for init (OAuth + tools/list).
+        self.init_done.notified().await;
+        let mut tools = self.upstream_tools.read().await.clone();
         tools.push(query_handle_tool_def());
         tools
     }
@@ -701,20 +726,20 @@ fn query_handle_tool_def() -> Tool {
     )
 }
 
-/// Connect to the upstream MCP, run the handshake, and return an initialised ProxyServer.
-async fn init_proxy_server(
+/// Perform the upstream handshake (OAuth if needed + initialize + tools/list).
+/// Returns the list of upstream tools. Runs concurrently with the MCP stdio server.
+async fn upstream_handshake(
     upstream_url: &str,
-    headers: &[(String, String)],
-    threshold: usize,
-    token_file: Option<std::path::PathBuf>,
-) -> Result<ProxyServer, ContextCutterError> {
+    extra_headers: &[(String, String)],
+    token_file: Option<&std::path::Path>,
+) -> Result<Vec<Tool>, ContextCutterError> {
     let url = upstream_url.to_string();
 
-    // Resolve auth headers — triggers OAuth browser flow if token is missing/expired.
-    let hdrs = get_authed_headers(upstream_url, headers, token_file.as_deref()).await;
+    // Auth — triggers the OAuth browser flow if the token is missing/expired.
+    let hdrs = get_authed_headers(upstream_url, extra_headers, token_file).await;
 
-    // Step 1: initialize
-    let _init_result = tokio::task::spawn_blocking({
+    // MCP initialize
+    let _init = tokio::task::spawn_blocking({
         let url = url.clone();
         let hdrs = hdrs.clone();
         move || {
@@ -740,7 +765,7 @@ async fn init_proxy_server(
 
     info!("upstream MCP initialized");
 
-    // Step 2: tools/list
+    // MCP tools/list
     let tools_result = tokio::task::spawn_blocking({
         let url = url.clone();
         let hdrs = hdrs.clone();
@@ -750,15 +775,13 @@ async fn init_proxy_server(
     .map_err(|e| ContextCutterError::Internal(format!("spawn_blocking: {e}")))?
     .map_err(|e| ContextCutterError::RequestFailed(format!("tools/list failed: {e}")))?;
 
-    let upstream_tools: Vec<Tool> = tools_result
+    let tools: Vec<Tool> = tools_result
         .get("tools")
         .and_then(|t| serde_json::from_value(t.clone()).ok())
         .unwrap_or_default();
 
-    info!(tool_count = upstream_tools.len(), "upstream tools discovered");
-
-    // Store only the extra headers (not the token) — token is re-read per-request.
-    Ok(ProxyServer::new(url, headers.to_vec(), threshold, upstream_tools, token_file))
+    info!(tool_count = tools.len(), "upstream tools discovered");
+    Ok(tools)
 }
 
 // ─── ServerHandler for ProxyServer ───────────────────────────────────────────
@@ -778,7 +801,11 @@ impl ServerHandler for ProxyServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        std::future::ready(Ok(ListToolsResult::with_all_items(self.all_tools())))
+        async move {
+            // Waits for OAuth + upstream handshake if still in progress.
+            let tools = self.ready_tools().await;
+            Ok(ListToolsResult::with_all_items(tools))
+        }
     }
 
     fn call_tool(
@@ -1122,17 +1149,18 @@ mod proxy_tests {
         assert_eq!(parse_proxy_headers(&[]).unwrap(), vec![]);
     }
 
-    #[test]
-    fn proxy_server_exposes_query_handle_in_tool_list() {
-        let server = ProxyServer::new(
+    #[tokio::test]
+    async fn proxy_server_exposes_query_handle_in_tool_list() {
+        let server = ProxyServer::new_pending(
             "https://example.com/mcp".to_string(),
             vec![],
             2048,
-            vec![],
             None,
         );
-        let all_tools = server.all_tools();
-        assert!(all_tools.iter().any(|t| t.name == "query_handle"));
+        // Populate tools (simulates upstream handshake completing with zero upstream tools).
+        server.set_upstream_tools(vec![]).await;
+        let tools = server.ready_tools().await;
+        assert!(tools.iter().any(|t| t.name == "query_handle"));
     }
 
     #[test]
@@ -1270,16 +1298,18 @@ async fn run_proxy_mode(
 
     start_background_sweeper();
 
-    let proxy_server = match init_proxy_server(upstream_url, &headers, threshold, token_file).await {
-        Ok(s) => s,
-        Err(e) => {
-            error!(error = %e, "failed to initialise upstream MCP");
-            eprintln!("context-cutter-mcp: upstream init failed: {e}");
-            std::process::exit(1);
-        }
-    };
+    // Create the server in a pending state — no upstream tools yet.
+    // This lets Claude Code complete the MCP handshake immediately while
+    // OAuth + upstream init run in the background.
+    let proxy = ProxyServer::new_pending(
+        upstream_url.to_string(),
+        headers.clone(),
+        threshold,
+        token_file.clone(),
+    );
 
-    let server = match proxy_server.serve(stdio()).await {
+    // Start serving stdio immediately so Claude Code gets an MCP response.
+    let server = match proxy.clone().serve(stdio()).await {
         Ok(s) => s,
         Err(e) => {
             error!(error = %e, "startup error");
@@ -1287,6 +1317,28 @@ async fn run_proxy_mode(
             std::process::exit(1);
         }
     };
+
+    // Run OAuth + upstream handshake concurrently.
+    // list_tools / call_tool will wait on init_done before proceeding.
+    let proxy_bg = proxy.clone();
+    let url_bg = upstream_url.to_string();
+    let hdrs_bg = headers.clone();
+    let tf_bg = token_file.clone();
+    tokio::spawn(async move {
+        match upstream_handshake(&url_bg, &hdrs_bg, tf_bg.as_deref()).await {
+            Ok(tools) => {
+                proxy_bg.set_upstream_tools(tools).await;
+                info!("proxy ready — upstream tools loaded");
+            }
+            Err(e) => {
+                error!(error = %e, "upstream handshake failed");
+                eprintln!("context-cutter-mcp: upstream handshake failed: {e}");
+                // Notify anyway so list_tools unblocks (returns empty tools).
+                proxy_bg.set_upstream_tools(vec![]).await;
+            }
+        }
+    });
+
     if let Err(e) = server.waiting().await {
         error!(error = %e, "proxy runtime error");
         eprintln!("context-cutter-mcp: proxy error: {e}");
