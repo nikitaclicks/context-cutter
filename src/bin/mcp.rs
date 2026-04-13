@@ -785,6 +785,7 @@ mod proxy_tests {
             vec![],
             2048,
             vec![],
+            None,
         );
         let all_tools = server.all_tools();
         assert!(all_tools.iter().any(|t| t.name == "query_handle"));
