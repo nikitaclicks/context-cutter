@@ -191,6 +191,26 @@ Call query_handle("hdl_a1b2c3d4e5f6", "$.field") to extract specific fields.
 
 Small responses (below `--proxy-threshold`, default 2 KB) pass through unchanged.
 
+### Authentication
+
+For MCPs that require OAuth (e.g. ClickUp), authenticate once through your MCP client's normal auth flow. The token is saved to a file (Claude Code saves to `~/.claude/<server-name>-token`). Point the proxy at that file with `--proxy-token-file` and it handles the rest automatically:
+
+- If the token is valid → used silently
+- If the token is missing or expired → browser opens automatically for re-authentication (OAuth 2.0 + PKCE), token saved, proxy continues
+
+```json
+{
+  "clickup-staging": {
+    "command": "npx",
+    "args": [
+      "-y", "context-cutter-mcp",
+      "--proxy", "https://mcp.clickup-stg.com/mcp",
+      "--proxy-token-file", "~/.claude/clickup-status-token"
+    ]
+  }
+}
+```
+
 ### CLI flags
 
 | Flag | Default | Description |
@@ -198,6 +218,7 @@ Small responses (below `--proxy-threshold`, default 2 KB) pass through unchanged
 | `--proxy <url>` | — | Upstream HTTP MCP URL to proxy |
 | `--proxy-threshold <bytes>` | `2048` | Responses ≥ this size are intercepted |
 | `--proxy-header <Key: Value>` | — | Extra header forwarded to upstream (repeatable) |
+| `--proxy-token-file <path>` | — | Path to Bearer token file; re-read on every request so token refreshes are automatic. Supports `~` expansion. |
 
 ## Install
 
