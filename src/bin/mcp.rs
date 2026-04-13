@@ -147,6 +147,72 @@ fn boundary_error(err: ContextCutterError) -> String {
     err.to_string()
 }
 
+// ─── Proxy helpers ────────────────────────────────────────────────────────────
+
+/// Parse `--proxy-header` strings of the form `"Key: Value"` into pairs.
+fn parse_proxy_headers(raw: &[String]) -> Result<Vec<(String, String)>, String> {
+    raw.iter()
+        .map(|h| {
+            h.split_once(": ")
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .ok_or_else(|| {
+                    format!("invalid --proxy-header (expected 'Key: Value'): {h}")
+                })
+        })
+        .collect()
+}
+
+/// POST a JSON-RPC 2.0 request to `url` and return the `result` field.
+///
+/// Must be called inside `tokio::task::spawn_blocking` — `ureq` is synchronous.
+fn upstream_call(
+    url: &str,
+    method: &str,
+    params: serde_json::Value,
+    headers: &[(String, String)],
+    id: u64,
+) -> Result<serde_json::Value, ContextCutterError> {
+    let body_str = serde_json::to_string(&serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    }))
+    .map_err(|e| ContextCutterError::Serialize(e.to_string()))?;
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(30))
+        .build();
+
+    let mut req = agent
+        .post(url)
+        .set("Content-Type", "application/json")
+        .set("Accept", "application/json, text/event-stream");
+    for (k, v) in headers {
+        req = req.set(k, v);
+    }
+
+    let response = req
+        .send_string(&body_str)
+        .map_err(|e| ContextCutterError::RequestFailed(e.to_string()))?;
+
+    let response_str = read_response_with_limit(response, max_payload_bytes())?;
+    let json: serde_json::Value = serde_json::from_str(&response_str)
+        .map_err(|e| ContextCutterError::InvalidJson(format!("upstream response: {e}")))?;
+
+    if let Some(err) = json.get("error") {
+        return Err(ContextCutterError::RequestFailed(format!(
+            "upstream MCP error: {err}"
+        )));
+    }
+
+    json.get("result").cloned().ok_or_else(|| {
+        ContextCutterError::RequestFailed(
+            "upstream response missing 'result' field".to_string(),
+        )
+    })
+}
+
 // ─── Tool parameter types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -329,6 +395,35 @@ impl ServerHandler for ContextCutterServer {
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+
+    #[test]
+    fn parse_proxy_headers_valid() {
+        let raw = vec![
+            "Authorization: Bearer abc123".to_string(),
+            "X-Custom: value".to_string(),
+        ];
+        let result = parse_proxy_headers(&raw).unwrap();
+        assert_eq!(result, vec![
+            ("Authorization".to_string(), "Bearer abc123".to_string()),
+            ("X-Custom".to_string(), "value".to_string()),
+        ]);
+    }
+
+    #[test]
+    fn parse_proxy_headers_malformed_returns_err() {
+        let raw = vec!["no-colon-space".to_string()];
+        assert!(parse_proxy_headers(&raw).is_err());
+    }
+
+    #[test]
+    fn parse_proxy_headers_empty() {
+        assert_eq!(parse_proxy_headers(&[]).unwrap(), vec![]);
+    }
+}
 
 async fn run_normal_mode() {
     start_background_sweeper();
