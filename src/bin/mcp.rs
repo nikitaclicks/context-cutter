@@ -454,12 +454,89 @@ fn text_content(text: String) -> Annotated<RawContent> {
     Annotated::new(RawContent::text(text), None)
 }
 
-/// Stub — implemented in Task 5.
+// ─── Interception ─────────────────────────────────────────────────────────────
+
+/// If the upstream result is at or above `threshold` bytes, store it and return
+/// a handle + preview. Otherwise pass the result through as-is.
 fn intercept_if_large(
-    _result: serde_json::Value,
-    _threshold: usize,
+    upstream_result: serde_json::Value,
+    threshold: usize,
 ) -> Result<CallToolResult, ContextCutterError> {
-    unimplemented!("implemented in Task 5")
+    let result_str = serde_json::to_string(&upstream_result)
+        .map_err(|e| ContextCutterError::Serialize(e.to_string()))?;
+
+    if result_str.len() < threshold {
+        // Small — pass through as a text response.
+        return Ok(CallToolResult::success(vec![text_content(result_str)]));
+    }
+
+    // Large — extract inner JSON text if available; otherwise store the envelope.
+    let payload_str = upstream_result
+        .get("content")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("text"))
+        .and_then(|t| t.as_str())
+        .filter(|t| t.starts_with('{') || t.starts_with('['))
+        .unwrap_or(&result_str);
+
+    let handle_id = engine_store(payload_str)?;
+    let teaser_str = engine_teaser(&handle_id)?;
+    let preview = build_preview_text(&handle_id, payload_str.len(), &teaser_str)?;
+
+    Ok(CallToolResult::success(vec![text_content(preview)]))
+}
+
+/// Render the preview text shown to Claude when a response is intercepted.
+fn build_preview_text(
+    handle_id: &str,
+    original_bytes: usize,
+    teaser_str: &str,
+) -> Result<String, ContextCutterError> {
+    let teaser: serde_json::Value = serde_json::from_str(teaser_str)
+        .map_err(|e| ContextCutterError::InvalidJson(format!("teaser: {e}")))?;
+
+    let kb = (original_bytes as f64) / 1024.0;
+    let mut lines = vec![
+        format!("[context-cutter] Response stored ({kb:.1} KB → handle: {handle_id})"),
+        String::new(),
+        "Preview:".to_string(),
+    ];
+
+    if let Some(structure) = teaser.get("structure").and_then(|s| s.as_object()) {
+        for (key, val) in structure.iter().take(20) {
+            lines.push(format!("  {key}: {}", format_preview_value(val)));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push(format!(
+        r#"Call query_handle("{handle_id}", "$.field") to extract specific fields."#
+    ));
+
+    Ok(lines.join("\n"))
+}
+
+/// Render a single teaser value for the preview block.
+pub fn format_preview_value(val: &serde_json::Value) -> String {
+    match val {
+        serde_json::Value::String(s) => {
+            if s.len() > 80 {
+                format!("\"{}...\" (truncated)", &s[..80])
+            } else {
+                format!("\"{s}\"")
+            }
+        }
+        serde_json::Value::Array(arr) => format!("[{} items]", arr.len()),
+        serde_json::Value::Object(obj) => {
+            if let Some(t) = obj.get("_type").and_then(|v| v.as_str()) {
+                if t.starts_with("Array[") {
+                    return t.to_string();
+                }
+            }
+            format!("{{{} keys}}", obj.len())
+        }
+        other => other.to_string(),
+    }
 }
 
 // ─── MCP server ───────────────────────────────────────────────────────────────
@@ -659,6 +736,61 @@ mod proxy_tests {
         );
         let all_tools = server.all_tools();
         assert!(all_tools.iter().any(|t| t.name == "query_handle"));
+    }
+
+    #[test]
+    fn intercept_if_large_passes_through_small_result() {
+        let result = serde_json::json!({ "content": [{"type":"text","text":"hi"}], "isError": false });
+        let call_result = intercept_if_large(result, 2048).unwrap();
+        assert_eq!(call_result.content.len(), 1);
+        let text = match &call_result.content[0].raw {
+            RawContent::Text(t) => t.text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(!text.contains("[context-cutter]"));
+    }
+
+    #[test]
+    fn intercept_if_large_replaces_big_result_with_handle() {
+        let big_json = serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": serde_json::to_string(&serde_json::json!({
+                    "id": "abc",
+                    "name": "Big Payload",
+                    "items": (0..100).collect::<Vec<_>>()
+                })).unwrap()
+            }],
+            "isError": false
+        });
+        let call_result = intercept_if_large(big_json, 10).unwrap(); // 10-byte threshold
+        let text = match &call_result.content[0].raw {
+            RawContent::Text(t) => t.text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("[context-cutter]"));
+        assert!(text.contains("hdl_"));
+        assert!(text.contains("query_handle"));
+    }
+
+    #[test]
+    fn format_preview_truncates_long_strings() {
+        let long_str = "a".repeat(200);
+        let result = format_preview_value(&serde_json::Value::String(long_str));
+        assert!(result.len() <= 100);
+        assert!(result.contains("(truncated)"));
+    }
+
+    #[test]
+    fn format_preview_shows_array_length() {
+        let arr = serde_json::json!([1, 2, 3]);
+        assert_eq!(format_preview_value(&arr), "[3 items]");
+    }
+
+    #[test]
+    fn format_preview_shows_object_key_count() {
+        let obj = serde_json::json!({"a": 1, "b": 2});
+        assert_eq!(format_preview_value(&obj), "{2 keys}");
     }
 }
 
