@@ -10,11 +10,16 @@ use context_cutter::error::ContextCutterError;
 use context_cutter::store::start_background_sweeper;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{ServerCapabilities, ServerInfo},
+    model::{
+        CallToolRequestParams, CallToolResult, Content, ListToolsResult,
+        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+    },
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
-    ServerHandler, ServiceExt,
+    Error as McpError, ServerHandler, ServiceExt,
 };
+use rmcp::service::RequestContext;
+use rmcp::service::RoleServer;
 use clap::Parser;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -237,6 +242,130 @@ struct QueryParams {
     json_path: String,
 }
 
+// ─── Proxy server ─────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct ProxyServer {
+    upstream_url: String,
+    upstream_headers: Arc<Vec<(String, String)>>,
+    threshold: usize,
+    upstream_tools: Arc<Vec<Tool>>,
+    next_id: Arc<AtomicU64>,
+}
+
+impl ProxyServer {
+    fn new(
+        upstream_url: String,
+        upstream_headers: Vec<(String, String)>,
+        threshold: usize,
+        upstream_tools: Vec<Tool>,
+    ) -> Self {
+        Self {
+            upstream_url,
+            upstream_headers: Arc::new(upstream_headers),
+            threshold,
+            upstream_tools: Arc::new(upstream_tools),
+            next_id: Arc::new(AtomicU64::new(3)), // 1 and 2 used at init
+        }
+    }
+
+    fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// Returns upstream tools combined with the local query_handle tool.
+    fn all_tools(&self) -> Vec<Tool> {
+        let mut tools = (*self.upstream_tools).clone();
+        tools.push(query_handle_tool_def());
+        tools
+    }
+}
+
+/// Build the query_handle Tool definition for advertising to Claude.
+fn query_handle_tool_def() -> Tool {
+    let schema: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+        r#"{
+            "type": "object",
+            "properties": {
+                "handle_id": {
+                    "type": "string",
+                    "description": "Handle ID returned by a proxied tool call."
+                },
+                "json_path": {
+                    "type": "string",
+                    "description": "JSONPath expression, e.g. $.user.name or user.name."
+                }
+            },
+            "required": ["handle_id", "json_path"]
+        }"#,
+    )
+    .expect("query_handle schema is valid JSON");
+
+    Tool::new(
+        "query_handle",
+        "Extract a value from a previously stored JSON payload using JSONPath. \
+         Accepts full JSONPath ($.foo.bar) or dot notation (foo.bar). \
+         Returns the matched value as JSON or null.",
+        Arc::new(schema),
+    )
+}
+
+/// Connect to the upstream MCP, run the handshake, and return an initialised ProxyServer.
+async fn init_proxy_server(
+    upstream_url: &str,
+    headers: &[(String, String)],
+    threshold: usize,
+) -> Result<ProxyServer, ContextCutterError> {
+    let url = upstream_url.to_string();
+    let hdrs = headers.to_vec();
+
+    // Step 1: initialize
+    let _init_result = tokio::task::spawn_blocking({
+        let url = url.clone();
+        let hdrs = hdrs.clone();
+        move || {
+            upstream_call(
+                &url,
+                "initialize",
+                serde_json::json!({
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {
+                        "name": "context-cutter-proxy",
+                        "version": env!("CARGO_PKG_VERSION")
+                    }
+                }),
+                &hdrs,
+                1,
+            )
+        }
+    })
+    .await
+    .map_err(|e| ContextCutterError::Internal(format!("spawn_blocking: {e}")))?
+    .map_err(|e| ContextCutterError::RequestFailed(format!("initialize failed: {e}")))?;
+
+    info!("upstream MCP initialized");
+
+    // Step 2: tools/list
+    let tools_result = tokio::task::spawn_blocking({
+        let url = url.clone();
+        let hdrs = hdrs.clone();
+        move || upstream_call(&url, "tools/list", serde_json::json!({}), &hdrs, 2)
+    })
+    .await
+    .map_err(|e| ContextCutterError::Internal(format!("spawn_blocking: {e}")))?
+    .map_err(|e| ContextCutterError::RequestFailed(format!("tools/list failed: {e}")))?;
+
+    let upstream_tools: Vec<Tool> = tools_result
+        .get("tools")
+        .and_then(|t| serde_json::from_value(t.clone()).ok())
+        .unwrap_or_default();
+
+    info!(tool_count = upstream_tools.len(), "upstream tools discovered");
+
+    Ok(ProxyServer::new(url, hdrs, threshold, upstream_tools))
+}
+
 // ─── MCP server ───────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -422,6 +551,18 @@ mod proxy_tests {
     #[test]
     fn parse_proxy_headers_empty() {
         assert_eq!(parse_proxy_headers(&[]).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn proxy_server_exposes_query_handle_in_tool_list() {
+        let server = ProxyServer::new(
+            "https://example.com/mcp".to_string(),
+            vec![],
+            2048,
+            vec![],
+        );
+        let all_tools = server.all_tools();
+        assert!(all_tools.iter().any(|t| t.name == "query_handle"));
     }
 }
 
