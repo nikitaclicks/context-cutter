@@ -15,9 +15,12 @@ use rmcp::{
     transport::stdio,
     ServerHandler, ServiceExt,
 };
+use clap::Parser;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::Read;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::{error, info, instrument};
 use tracing_subscriber::EnvFilter;
 
@@ -75,6 +78,28 @@ fn validate_query_inputs(handle_id: &str, json_path: &str) -> Result<(), Context
         ));
     }
     Ok(())
+}
+
+// ─── CLI args ─────────────────────────────────────────────────────────────────
+
+#[derive(Parser, Debug)]
+#[command(name = "context-cutter-mcp", about = "ContextCutter MCP server")]
+struct Args {
+    /// Run as a transparent proxy in front of an HTTP MCP server.
+    /// Replaces the upstream MCP entry in your MCP config.
+    #[arg(long)]
+    proxy: Option<String>,
+
+    /// Response size threshold in bytes. Responses at or above this size are
+    /// intercepted and replaced with a handle + preview. Default: 2048.
+    #[arg(long, default_value_t = 2048)]
+    proxy_threshold: usize,
+
+    /// Extra HTTP header to forward to the upstream MCP server.
+    /// Format: "Key: Value". Repeat for multiple headers.
+    /// Example: --proxy-header "Authorization: Bearer $TOKEN"
+    #[arg(long)]
+    proxy_header: Vec<String>,
 }
 
 fn read_response_with_limit(
@@ -305,11 +330,8 @@ impl ServerHandler for ContextCutterServer {
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
-#[tokio::main]
-async fn main() {
-    init_tracing();
+async fn run_normal_mode() {
     start_background_sweeper();
-
     let server = match ContextCutterServer::new().serve(stdio()).await {
         Ok(s) => s,
         Err(e) => {
@@ -322,5 +344,22 @@ async fn main() {
         error!(error = %e, "server runtime error");
         eprintln!("context-cutter-mcp: server error: {e}");
         std::process::exit(1);
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    init_tracing();
+    let args = Args::parse();
+
+    if let Some(ref upstream_url) = args.proxy {
+        // proxy mode — implemented in subsequent tasks
+        let _ = upstream_url;
+        let _ = args.proxy_threshold;
+        let _ = args.proxy_header;
+        eprintln!("context-cutter-mcp: proxy mode not yet implemented");
+        std::process::exit(1);
+    } else {
+        run_normal_mode().await;
     }
 }
