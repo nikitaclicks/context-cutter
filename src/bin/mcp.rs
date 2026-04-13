@@ -795,6 +795,25 @@ mod proxy_tests {
     }
 }
 
+/// Returns true if `url` is a localhost URL safe for proxy use in tests.
+/// Only accepts `http://localhost`, `http://localhost:<port>`, `http://localhost/<path>`,
+/// and equivalents for `http://127.0.0.1`.
+fn is_localhost_proxy_url(url: &str) -> bool {
+    let tail_ok = |prefix: &str| {
+        matches!(
+            url[prefix.len()..].bytes().next(),
+            None | Some(b':') | Some(b'/') | Some(b'?') | Some(b'#')
+        )
+    };
+    if url.starts_with("http://127.0.0.1") {
+        tail_ok("http://127.0.0.1")
+    } else if url.starts_with("http://localhost") {
+        tail_ok("http://localhost")
+    } else {
+        false
+    }
+}
+
 async fn run_proxy_mode(
     upstream_url: &str,
     threshold: usize,
@@ -808,11 +827,11 @@ async fn run_proxy_mode(
         }
     };
 
-    if !upstream_url.starts_with("https://")
-        && !upstream_url.starts_with("http://127.0.0.1")
-        && !upstream_url.starts_with("http://localhost")
-    {
-        eprintln!("context-cutter-mcp: --proxy URL must use https:// (or http://localhost for local testing)");
+    if !upstream_url.starts_with("https://") && !is_localhost_proxy_url(upstream_url) {
+        eprintln!(
+            "context-cutter-mcp: --proxy URL must use https:// \
+             (or http://localhost / http://127.0.0.1 for local testing)"
+        );
         std::process::exit(1);
     }
 
