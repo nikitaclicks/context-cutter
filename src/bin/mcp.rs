@@ -793,6 +793,27 @@ mod proxy_tests {
         let obj = serde_json::json!({"a": 1, "b": 2});
         assert_eq!(format_preview_value(&obj), "{2 keys}");
     }
+
+    #[test]
+    fn localhost_proxy_url_acceptance() {
+        // Accepted URLs
+        assert!(is_localhost_proxy_url("http://localhost"));
+        assert!(is_localhost_proxy_url("http://localhost:8080"));
+        assert!(is_localhost_proxy_url("http://localhost/mcp"));
+        assert!(is_localhost_proxy_url("http://localhost:3000/mcp"));
+        assert!(is_localhost_proxy_url("http://127.0.0.1"));
+        assert!(is_localhost_proxy_url("http://127.0.0.1:9090/mcp"));
+
+        // Rejected — subdomain bypass attempt
+        assert!(!is_localhost_proxy_url("http://localhost.attacker.com"));
+        assert!(!is_localhost_proxy_url("http://127.0.0.1.evil.com"));
+
+        // Rejected — non-http schemes are handled by the outer https check, not this fn
+        assert!(!is_localhost_proxy_url("https://localhost:8080"));
+
+        // Rejected — completely unrelated
+        assert!(!is_localhost_proxy_url("http://example.com"));
+    }
 }
 
 /// Returns true if `url` is a localhost URL safe for proxy use in tests.
