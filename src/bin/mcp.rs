@@ -521,7 +521,8 @@ pub fn format_preview_value(val: &serde_json::Value) -> String {
     match val {
         serde_json::Value::String(s) => {
             if s.len() > 80 {
-                format!("\"{}...\" (truncated)", &s[..80])
+                let truncated: String = s.chars().take(80).collect();
+                format!("\"{truncated}...\" (truncated)")
             } else {
                 format!("\"{s}\"")
             }
