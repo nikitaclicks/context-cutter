@@ -11,8 +11,8 @@ use context_cutter::store::start_background_sweeper;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolRequestParams, CallToolResult, Content, ListToolsResult,
-        PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
+        Annotated, CallToolRequestParams, CallToolResult, ListToolsResult,
+        PaginatedRequestParams, RawContent, ServerCapabilities, ServerInfo, Tool,
     },
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
@@ -364,6 +364,102 @@ async fn init_proxy_server(
     info!(tool_count = upstream_tools.len(), "upstream tools discovered");
 
     Ok(ProxyServer::new(url, hdrs, threshold, upstream_tools))
+}
+
+// ─── ServerHandler for ProxyServer ───────────────────────────────────────────
+
+impl ServerHandler for ProxyServer {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_instructions(
+                "Transparent MCP proxy with response interception. \
+                 Large tool responses are stored as handles. \
+                 Use query_handle(handle_id, \"$.field\") to extract specific fields.",
+            )
+    }
+
+    fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
+        std::future::ready(Ok(ListToolsResult::with_all_items(self.all_tools())))
+    }
+
+    fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
+        async move {
+            let tool_name = request.name.as_ref().to_string();
+
+            // ── Local: query_handle ────────────────────────────────────────────
+            if tool_name == "query_handle" {
+                let args = request.arguments.as_ref().ok_or_else(|| {
+                    McpError::invalid_params("query_handle requires arguments", None)
+                })?;
+                let handle_id = args
+                    .get("handle_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::invalid_params("missing handle_id", None))?;
+                let json_path = args
+                    .get("json_path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::invalid_params("missing json_path", None))?;
+
+                validate_query_inputs(handle_id, json_path)
+                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
+
+                let result = engine_query(handle_id, json_path)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+                return Ok(CallToolResult::success(vec![text_content(result)]));
+            }
+
+            // ── Forward to upstream ────────────────────────────────────────────
+            let url = self.upstream_url.clone();
+            let headers = (*self.upstream_headers).clone();
+            let id = self.next_id();
+            let threshold = self.threshold;
+            let arguments = request
+                .arguments
+                .map(serde_json::Value::Object)
+                .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+
+            let upstream_result = tokio::task::spawn_blocking(move || {
+                upstream_call(
+                    &url,
+                    "tools/call",
+                    serde_json::json!({ "name": tool_name, "arguments": arguments }),
+                    &headers,
+                    id,
+                )
+            })
+            .await
+            .map_err(|e| McpError::internal_error(format!("spawn_blocking: {e}"), None))?
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+            // ── Intercept or pass through ──────────────────────────────────────
+            match intercept_if_large(upstream_result, threshold) {
+                Ok(result) => Ok(result),
+                Err(e) => Err(McpError::internal_error(e.to_string(), None)),
+            }
+        }
+    }
+}
+
+/// Convenience: wrap a string as a text Content item.
+fn text_content(text: String) -> Annotated<RawContent> {
+    Annotated::new(RawContent::text(text), None)
+}
+
+/// Stub — implemented in Task 5.
+fn intercept_if_large(
+    _result: serde_json::Value,
+    _threshold: usize,
+) -> Result<CallToolResult, ContextCutterError> {
+    unimplemented!("implemented in Task 5")
 }
 
 // ─── MCP server ───────────────────────────────────────────────────────────────
