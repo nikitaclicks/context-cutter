@@ -200,12 +200,12 @@ For MCPs that require OAuth (e.g. ClickUp), authenticate once through your MCP c
 
 ```json
 {
-  "clickup-staging": {
+  "clickup": {
     "command": "npx",
     "args": [
       "-y", "context-cutter-mcp",
-      "--proxy", "https://mcp.clickup-stg.com/mcp",
-      "--proxy-token-file", "~/.claude/clickup-status-token"
+      "--proxy", "https://mcp.clickup.com/mcp",
+      "--proxy-token-file", "~/.claude/clickup-token"
     ]
   }
 }
