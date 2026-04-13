@@ -235,17 +235,34 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// Returns true if the JWT `exp` claim is in the past, or if the token is unparseable.
+/// Returns true only if the token is a parseable JWT whose `exp` is in the past.
+///
+/// Returns **false** (treat as valid) for:
+/// - JWE tokens (encrypted — payload is ciphertext, not JSON)
+/// - Opaque / non-JWT tokens
+/// - Tokens with no `exp` claim
+///
+/// These token types are used as-is; if the server rejects them with 401,
+/// the OAuth flow will re-run reactively.
 fn is_jwt_expired(token: &str) -> bool {
     let payload = token.split('.').nth(1).unwrap_or("");
-    let decoded = base64url_decode(payload).unwrap_or_default();
-    let json: serde_json::Value = serde_json::from_slice(&decoded).unwrap_or(serde_json::Value::Null);
-    let exp = json.get("exp").and_then(|v| v.as_u64()).unwrap_or(0);
+    let decoded = match base64url_decode(payload) {
+        Some(d) => d,
+        None => return false, // can't decode → assume valid
+    };
+    let json: serde_json::Value = match serde_json::from_slice(&decoded) {
+        Ok(v) => v,
+        Err(_) => return false, // not JSON (e.g. JWE ciphertext) → assume valid
+    };
+    let exp = match json.get("exp").and_then(|v| v.as_u64()) {
+        Some(e) => e,
+        None => return false, // no exp claim → assume valid
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    exp == 0 || now >= exp
+    now >= exp
 }
 
 /// Percent-encode a string for use in query parameters.
@@ -580,7 +597,26 @@ fn upstream_call(
         .send_string(&body_str)
         .map_err(|e| ContextCutterError::RequestFailed(e.to_string()))?;
 
-    let response_str = read_response_with_limit(response, max_payload_bytes())?;
+    // Some HTTP MCPs return SSE (text/event-stream) even for synchronous requests.
+    let is_sse = response
+        .header("Content-Type")
+        .map(|ct| ct.contains("event-stream"))
+        .unwrap_or(false);
+
+    let raw = read_response_with_limit(response, max_payload_bytes())?;
+
+    // If SSE, extract the JSON payload from the first "data: {...}" line.
+    let response_str = if is_sse {
+        raw.lines()
+            .find_map(|line| line.strip_prefix("data: ").map(|d| d.trim().to_string()))
+            .filter(|d| !d.is_empty() && d != "[DONE]")
+            .ok_or_else(|| {
+                ContextCutterError::RequestFailed("SSE response contained no data event".into())
+            })?
+    } else {
+        raw
+    };
+
     let json: serde_json::Value = serde_json::from_str(&response_str)
         .map_err(|e| ContextCutterError::InvalidJson(format!("upstream response: {e}")))?;
 
