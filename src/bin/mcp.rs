@@ -352,11 +352,8 @@ async fn main() {
     init_tracing();
     let args = Args::parse();
 
-    if let Some(ref upstream_url) = args.proxy {
+    if args.proxy.is_some() {
         // proxy mode — implemented in subsequent tasks
-        let _ = upstream_url;
-        let _ = args.proxy_threshold;
-        let _ = args.proxy_header;
         eprintln!("context-cutter-mcp: proxy mode not yet implemented");
         std::process::exit(1);
     } else {
