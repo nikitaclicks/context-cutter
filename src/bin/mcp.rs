@@ -795,6 +795,55 @@ mod proxy_tests {
     }
 }
 
+async fn run_proxy_mode(
+    upstream_url: &str,
+    threshold: usize,
+    raw_headers: &[String],
+) {
+    let headers = match parse_proxy_headers(raw_headers) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("context-cutter-mcp: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    if !upstream_url.starts_with("https://")
+        && !upstream_url.starts_with("http://127.0.0.1")
+        && !upstream_url.starts_with("http://localhost")
+    {
+        eprintln!("context-cutter-mcp: --proxy URL must use https:// (or http://localhost for local testing)");
+        std::process::exit(1);
+    }
+
+    info!(upstream_url, threshold, "starting proxy mode");
+
+    start_background_sweeper();
+
+    let proxy_server = match init_proxy_server(upstream_url, &headers, threshold).await {
+        Ok(s) => s,
+        Err(e) => {
+            error!(error = %e, "failed to initialise upstream MCP");
+            eprintln!("context-cutter-mcp: upstream init failed: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let server = match proxy_server.serve(stdio()).await {
+        Ok(s) => s,
+        Err(e) => {
+            error!(error = %e, "startup error");
+            eprintln!("context-cutter-mcp: startup error: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = server.waiting().await {
+        error!(error = %e, "proxy runtime error");
+        eprintln!("context-cutter-mcp: proxy error: {e}");
+        std::process::exit(1);
+    }
+}
+
 async fn run_normal_mode() {
     start_background_sweeper();
     let server = match ContextCutterServer::new().serve(stdio()).await {
@@ -817,10 +866,8 @@ async fn main() {
     init_tracing();
     let args = Args::parse();
 
-    if args.proxy.is_some() {
-        // proxy mode — implemented in subsequent tasks
-        eprintln!("context-cutter-mcp: proxy mode not yet implemented");
-        std::process::exit(1);
+    if let Some(ref upstream_url) = args.proxy {
+        run_proxy_mode(upstream_url, args.proxy_threshold, &args.proxy_header).await;
     } else {
         run_normal_mode().await;
     }
