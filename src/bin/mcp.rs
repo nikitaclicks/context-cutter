@@ -949,7 +949,8 @@ impl ServerHandler for ProxyServer {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Transparent MCP proxy with response interception. \
                  Large tool responses are stored as handles. \
-                 Use query_handle(handle_id, \"$.field\") to extract specific fields.",
+                 IMPORTANT: always use THIS server's query_handle tool (not any other server's) \
+                 to extract fields from handles returned by this server's tools.",
         )
     }
 
@@ -1081,7 +1082,7 @@ fn build_preview_text(
 
     lines.push(String::new());
     lines.push(format!(
-        r#"Call query_handle("{handle_id}", "$.field") to extract specific fields."#
+        r#"Call THIS server's query_handle("{handle_id}", "$.field") to extract specific fields."#
     ));
 
     Ok(lines.join("\n"))
