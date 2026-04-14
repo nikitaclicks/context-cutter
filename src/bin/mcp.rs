@@ -714,12 +714,15 @@ struct ProxyServer {
     upstream_url: String,
     upstream_headers: Arc<Vec<(String, String)>>,
     threshold: usize,
-    /// Populated after upstream init; guarded so list_tools / call_tool can wait.
+    /// Populated after upstream init; guarded so call_tool can wait if needed.
     upstream_tools: Arc<RwLock<Vec<Tool>>>,
     /// Set to 1 (Release) before notify_waiters(). Durable — late callers still see 1.
     init_complete: Arc<std::sync::atomic::AtomicUsize>,
     /// Wakes up waiters when init completes. Not durable on its own — use with init_complete.
     init_done: Arc<Notify>,
+    /// The client sink, stored on first list_tools call so the background task can
+    /// push a ToolListChanged notification once upstream tools are ready.
+    client_sink: Arc<std::sync::OnceLock<rmcp::Peer<RoleServer>>>,
     next_id: Arc<AtomicU64>,
     token_file: Option<std::path::PathBuf>,
 }
@@ -740,18 +743,25 @@ impl ProxyServer {
             upstream_tools: Arc::new(RwLock::new(Vec::new())),
             init_complete: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             init_done: Arc::new(Notify::new()),
+            client_sink: Arc::new(std::sync::OnceLock::new()),
             next_id: Arc::new(AtomicU64::new(3)),
             token_file,
         }
     }
 
     /// Populate upstream tools and signal readiness. Called once after OAuth + tools/list.
+    /// Sends a ToolListChanged notification so the client refreshes its tool list.
     async fn set_upstream_tools(&self, tools: Vec<Tool>) {
         *self.upstream_tools.write().await = tools;
-        // Store before notify so late callers see the flag even if they miss the notification.
         self.init_complete
             .store(1, std::sync::atomic::Ordering::Release);
         self.init_done.notify_waiters();
+
+        // Push ToolListChanged so the client (Claude Code) re-fetches without waiting.
+        if let Some(sink) = self.client_sink.get() {
+            let _ = sink.notify_tool_list_changed().await;
+            info!("sent ToolListChanged notification to client");
+        }
     }
 
     fn next_id(&self) -> u64 {
@@ -880,21 +890,43 @@ async fn upstream_handshake(
 
 impl ServerHandler for ProxyServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        )
+        .with_instructions(
             "Transparent MCP proxy with response interception. \
-                 Large tool responses are stored as handles. \
-                 Use query_handle(handle_id, \"$.field\") to extract specific fields.",
+             Large tool responses are stored as handles. \
+             Use query_handle(handle_id, \"$.field\") to extract specific fields.",
         )
     }
 
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        // Waits for OAuth + upstream handshake if still in progress.
-        let tools = self.ready_tools().await;
-        Ok(ListToolsResult::with_all_items(tools))
+        // Store the client sink so the background task can push ToolListChanged later.
+        let _ = self.client_sink.set(context.peer.clone());
+
+        if self
+            .init_complete
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 1
+        {
+            // Already ready — return full tool list immediately.
+            let mut tools = self.upstream_tools.read().await.clone();
+            tools.push(query_handle_tool_def());
+            Ok(ListToolsResult::with_all_items(tools))
+        } else {
+            // Not yet ready — return just query_handle now; ToolListChanged will
+            // fire once the upstream handshake (and any OAuth) completes.
+            Ok(ListToolsResult::with_all_items(vec![
+                query_handle_tool_def(),
+            ]))
+        }
     }
 
     async fn call_tool(
