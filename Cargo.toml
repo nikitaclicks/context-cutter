@@ -1,6 +1,6 @@
 [package]
 name = "context-cutter"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 description = "Agent-agnostic middleware that cuts JSON payload bloat with lazy handles and teasers"
 license = "MIT"
