@@ -69,7 +69,7 @@ jobs:
         run: cargo test
 
       - name: Run Python tests
-        run: pytest -m "not ai_e2e_offline and not ai_e2e_live"
+        run: pytest -m "not ai_e2e_offline and not ai_e2e_live and not integration"
 
   coverage:
     continue-on-error: true

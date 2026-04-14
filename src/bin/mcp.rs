@@ -5,27 +5,27 @@
 //! - `fetch_json_cutted`: fetch a JSON endpoint, store it, return `{handle_id, teaser}`.
 //! - `query_handle`: extract a specific value from a stored payload via JSONPath.
 
+use clap::Parser;
 use context_cutter::engine::{engine_query, engine_store, engine_teaser};
 use context_cutter::error::ContextCutterError;
 use context_cutter::store::start_background_sweeper;
+use rmcp::service::RequestContext;
+use rmcp::service::RoleServer;
 use rmcp::{
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        Annotated, CallToolRequestParams, CallToolResult, ListToolsResult,
-        PaginatedRequestParams, RawContent, ServerCapabilities, ServerInfo, Tool,
+        Annotated, CallToolRequestParams, CallToolResult, ListToolsResult, PaginatedRequestParams,
+        RawContent, ServerCapabilities, ServerInfo, Tool,
     },
     schemars, tool, tool_handler, tool_router,
     transport::stdio,
     ErrorData as McpError, ServerHandler, ServiceExt,
 };
-use rmcp::service::RequestContext;
-use rmcp::service::RoleServer;
-use clap::Parser;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::Read;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::sync::{Notify, RwLock};
 use tracing::{error, info, instrument, warn};
 use tracing_subscriber::EnvFilter;
@@ -195,15 +195,27 @@ fn random_bytes(n: usize) -> Vec<u8> {
 /// Base64url encode without padding (RFC 4648 §5, used for PKCE).
 fn base64url_encode(input: &[u8]) -> String {
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b0 = chunk[0] as usize;
-        let b1 = if chunk.len() > 1 { chunk[1] as usize } else { 0 };
-        let b2 = if chunk.len() > 2 { chunk[2] as usize } else { 0 };
+        let b1 = if chunk.len() > 1 {
+            chunk[1] as usize
+        } else {
+            0
+        };
+        let b2 = if chunk.len() > 2 {
+            chunk[2] as usize
+        } else {
+            0
+        };
         out.push(CHARS[b0 >> 2] as char);
         out.push(CHARS[((b0 & 3) << 4) | (b1 >> 4)] as char);
-        if chunk.len() > 1 { out.push(CHARS[((b1 & 15) << 2) | (b2 >> 6)] as char); }
-        if chunk.len() > 2 { out.push(CHARS[b2 & 63] as char); }
+        if chunk.len() > 1 {
+            out.push(CHARS[((b1 & 15) << 2) | (b2 >> 6)] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(CHARS[b2 & 63] as char);
+        }
     }
     out
 }
@@ -229,8 +241,12 @@ fn base64url_decode(input: &str) -> Option<Vec<u8>> {
         let c = decode_char(*chunk.get(2).unwrap_or(&b'='))?;
         let d = decode_char(*chunk.get(3).unwrap_or(&b'='))?;
         out.push((a << 2) | (b >> 4));
-        if chunk.get(2).filter(|&&x| x != b'=').is_some() { out.push((b << 4) | (c >> 2)); }
-        if chunk.get(3).filter(|&&x| x != b'=').is_some() { out.push((c << 6) | d); }
+        if chunk.get(2).filter(|&&x| x != b'=').is_some() {
+            out.push((b << 4) | (c >> 2));
+        }
+        if chunk.get(3).filter(|&&x| x != b'=').is_some() {
+            out.push((c << 6) | d);
+        }
     }
     Some(out)
 }
@@ -287,27 +303,42 @@ struct OAuthMeta {
 /// Fetch OAuth server metadata from `<base_url>/.well-known/oauth-authorization-server`.
 fn fetch_oauth_meta_sync(base_url: &str) -> Result<OAuthMeta, ContextCutterError> {
     let url = format!("{base_url}/.well-known/oauth-authorization-server");
-    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10)).build();
-    let body = agent.get(&url).call()
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
+    let body = agent
+        .get(&url)
+        .call()
         .map_err(|e| ContextCutterError::RequestFailed(format!("OAuth discovery failed: {e}")))?
         .into_string()
         .map_err(|e| ContextCutterError::RequestFailed(format!("OAuth discovery read: {e}")))?;
     let json: serde_json::Value = serde_json::from_str(&body)
         .map_err(|e| ContextCutterError::InvalidJson(format!("OAuth discovery JSON: {e}")))?;
     Ok(OAuthMeta {
-        authorization_endpoint: json["authorization_endpoint"].as_str()
-            .ok_or_else(|| ContextCutterError::RequestFailed("OAuth: missing authorization_endpoint".into()))?
+        authorization_endpoint: json["authorization_endpoint"]
+            .as_str()
+            .ok_or_else(|| {
+                ContextCutterError::RequestFailed("OAuth: missing authorization_endpoint".into())
+            })?
             .to_string(),
-        token_endpoint: json["token_endpoint"].as_str()
-            .ok_or_else(|| ContextCutterError::RequestFailed("OAuth: missing token_endpoint".into()))?
+        token_endpoint: json["token_endpoint"]
+            .as_str()
+            .ok_or_else(|| {
+                ContextCutterError::RequestFailed("OAuth: missing token_endpoint".into())
+            })?
             .to_string(),
         registration_endpoint: json["registration_endpoint"].as_str().map(String::from),
     })
 }
 
 /// Dynamically register a public OAuth client, returning the assigned client_id.
-fn register_oauth_client_sync(reg_endpoint: &str, redirect_uri: &str) -> Result<String, ContextCutterError> {
-    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(10)).build();
+fn register_oauth_client_sync(
+    reg_endpoint: &str,
+    redirect_uri: &str,
+) -> Result<String, ContextCutterError> {
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(10))
+        .build();
     let body = serde_json::json!({
         "client_name": "context-cutter-proxy",
         "redirect_uris": [redirect_uri],
@@ -316,7 +347,8 @@ fn register_oauth_client_sync(reg_endpoint: &str, redirect_uri: &str) -> Result<
         "token_endpoint_auth_method": "none",
     })
     .to_string();
-    let resp_str = agent.post(reg_endpoint)
+    let resp_str = agent
+        .post(reg_endpoint)
         .set("Content-Type", "application/json")
         .send_string(&body)
         .map_err(|e| ContextCutterError::RequestFailed(format!("client registration failed: {e}")))?
@@ -324,11 +356,11 @@ fn register_oauth_client_sync(reg_endpoint: &str, redirect_uri: &str) -> Result<
         .map_err(|e| ContextCutterError::RequestFailed(e.to_string()))?;
     let json: serde_json::Value = serde_json::from_str(&resp_str)
         .map_err(|e| ContextCutterError::InvalidJson(e.to_string()))?;
-    json["client_id"].as_str()
-        .map(String::from)
-        .ok_or_else(|| ContextCutterError::RequestFailed(
-            format!("client registration: missing client_id in: {resp_str}")
+    json["client_id"].as_str().map(String::from).ok_or_else(|| {
+        ContextCutterError::RequestFailed(format!(
+            "client registration: missing client_id in: {resp_str}"
         ))
+    })
 }
 
 /// Exchange an authorization code for an access token using PKCE.
@@ -339,7 +371,9 @@ fn exchange_code_sync(
     code_verifier: &str,
     redirect_uri: &str,
 ) -> Result<String, ContextCutterError> {
-    let agent = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(15)).build();
+    let agent = ureq::AgentBuilder::new()
+        .timeout(std::time::Duration::from_secs(15))
+        .build();
     let body = format!(
         "grant_type=authorization_code&code={}&client_id={}&code_verifier={}&redirect_uri={}",
         url_encode(code),
@@ -347,7 +381,8 @@ fn exchange_code_sync(
         url_encode(code_verifier),
         url_encode(redirect_uri),
     );
-    let resp_str = agent.post(token_endpoint)
+    let resp_str = agent
+        .post(token_endpoint)
         .set("Content-Type", "application/x-www-form-urlencoded")
         .send_string(&body)
         .map_err(|e| ContextCutterError::RequestFailed(format!("token exchange failed: {e}")))?
@@ -355,11 +390,14 @@ fn exchange_code_sync(
         .map_err(|e| ContextCutterError::RequestFailed(e.to_string()))?;
     let json: serde_json::Value = serde_json::from_str(&resp_str)
         .map_err(|e| ContextCutterError::InvalidJson(e.to_string()))?;
-    json["access_token"].as_str()
+    json["access_token"]
+        .as_str()
         .map(String::from)
-        .ok_or_else(|| ContextCutterError::RequestFailed(
-            format!("token exchange: missing access_token (response: {resp_str})")
-        ))
+        .ok_or_else(|| {
+            ContextCutterError::RequestFailed(format!(
+                "token exchange: missing access_token (response: {resp_str})"
+            ))
+        })
 }
 
 /// Start a one-shot local HTTP server, wait for the OAuth callback, and return the `code`.
@@ -368,16 +406,22 @@ async fn wait_for_oauth_callback(
 ) -> Result<String, ContextCutterError> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let (mut stream, _) = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        listener.accept(),
-    )
-    .await
-    .map_err(|_| ContextCutterError::RequestFailed("OAuth: timed out waiting for browser login (5 min)".into()))?
-    .map_err(|e| ContextCutterError::RequestFailed(format!("OAuth callback accept: {e}")))?;
+    let (mut stream, _) =
+        tokio::time::timeout(std::time::Duration::from_secs(300), listener.accept())
+            .await
+            .map_err(|_| {
+                ContextCutterError::RequestFailed(
+                    "OAuth: timed out waiting for browser login (5 min)".into(),
+                )
+            })?
+            .map_err(|e| {
+                ContextCutterError::RequestFailed(format!("OAuth callback accept: {e}"))
+            })?;
 
     let mut buf = [0u8; 8192];
-    let n = stream.read(&mut buf).await
+    let n = stream
+        .read(&mut buf)
+        .await
         .map_err(|e| ContextCutterError::RequestFailed(format!("OAuth callback read: {e}")))?;
 
     // Parse code from "GET /callback?code=xxx&state=yyy HTTP/1.1"
@@ -395,14 +439,15 @@ async fn wait_for_oauth_callback(
     }
 
     // Respond with a success page so the browser doesn't hang.
-    let _ = stream.write_all(
-        b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
+    let _ = stream
+        .write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n\
           <html><body style='font-family:sans-serif;text-align:center;padding:60px'>\
           <h2>\xe2\x9c\x93 Authentication successful</h2>\
           <p>You can close this tab and return to Claude.</p>\
           </body></html>",
-    )
-    .await;
+        )
+        .await;
 
     if code.is_empty() {
         return Err(ContextCutterError::RequestFailed(
@@ -437,9 +482,11 @@ async fn run_oauth_flow(
     .map_err(|e| ContextCutterError::RequestFailed(format!("OAuth discovery: {e}")))?;
 
     // Bind local callback server on a random port.
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
         .map_err(|e| ContextCutterError::RequestFailed(format!("callback server: {e}")))?;
-    let port = listener.local_addr()
+    let port = listener
+        .local_addr()
         .map_err(|e| ContextCutterError::RequestFailed(format!("callback port: {e}")))?
         .port();
     let redirect_uri = format!("http://127.0.0.1:{port}/callback");
@@ -459,7 +506,7 @@ async fn run_oauth_flow(
     let code_verifier = base64url_encode(&random_bytes(32));
     let code_challenge = {
         use sha2::{Digest, Sha256};
-        base64url_encode(&Sha256::digest(code_verifier.as_bytes()).to_vec())
+        base64url_encode(&Sha256::digest(code_verifier.as_bytes()))
     };
     let state = base64url_encode(&random_bytes(16));
 
@@ -476,7 +523,10 @@ async fn run_oauth_flow(
 
     // Open browser. Fall back to printing the URL if `open` isn't available.
     eprintln!("\n[context-cutter] Authentication required for upstream MCP.");
-    let opened = std::process::Command::new("open").arg(&auth_url).spawn().is_ok();
+    let opened = std::process::Command::new("open")
+        .arg(&auth_url)
+        .spawn()
+        .is_ok();
     if !opened {
         eprintln!("[context-cutter] Could not open browser automatically.");
     }
@@ -521,7 +571,9 @@ async fn get_authed_headers(
     token_file: Option<&std::path::Path>,
 ) -> Vec<(String, String)> {
     let mut headers = extra_headers.to_vec();
-    let Some(path) = token_file else { return headers };
+    let Some(path) = token_file else {
+        return headers;
+    };
 
     let existing = read_token_file(path);
     let needs_refresh = existing.as_deref().map(is_jwt_expired).unwrap_or(true);
@@ -556,9 +608,7 @@ fn parse_proxy_headers(raw: &[String]) -> Result<Vec<(String, String)>, String> 
         .map(|h| {
             h.split_once(": ")
                 .map(|(k, v)| (k.to_string(), v.to_string()))
-                .ok_or_else(|| {
-                    format!("invalid --proxy-header (expected 'Key: Value'): {h}")
-                })
+                .ok_or_else(|| format!("invalid --proxy-header (expected 'Key: Value'): {h}"))
         })
         .collect()
 }
@@ -627,9 +677,7 @@ fn upstream_call(
     }
 
     json.get("result").cloned().ok_or_else(|| {
-        ContextCutterError::RequestFailed(
-            "upstream response missing 'result' field".to_string(),
-        )
+        ContextCutterError::RequestFailed("upstream response missing 'result' field".to_string())
     })
 }
 
@@ -824,85 +872,81 @@ async fn upstream_handshake(
 
 impl ServerHandler for ProxyServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(
-                "Transparent MCP proxy with response interception. \
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "Transparent MCP proxy with response interception. \
                  Large tool responses are stored as handles. \
                  Use query_handle(handle_id, \"$.field\") to extract specific fields.",
-            )
+        )
     }
 
-    fn list_tools(
+    async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> + Send + '_ {
-        async move {
-            // Waits for OAuth + upstream handshake if still in progress.
-            let tools = self.ready_tools().await;
-            Ok(ListToolsResult::with_all_items(tools))
-        }
+    ) -> Result<ListToolsResult, McpError> {
+        // Waits for OAuth + upstream handshake if still in progress.
+        let tools = self.ready_tools().await;
+        Ok(ListToolsResult::with_all_items(tools))
     }
 
-    fn call_tool(
+    async fn call_tool(
         &self,
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> impl std::future::Future<Output = Result<CallToolResult, McpError>> + Send + '_ {
-        async move {
-            let tool_name = request.name.as_ref().to_string();
+    ) -> Result<CallToolResult, McpError> {
+        let tool_name = request.name.as_ref().to_string();
 
-            // ── Local: query_handle ────────────────────────────────────────────
-            if tool_name == "query_handle" {
-                let args = request.arguments.as_ref().ok_or_else(|| {
-                    McpError::invalid_params("query_handle requires arguments", None)
-                })?;
-                let handle_id = args
-                    .get("handle_id")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| McpError::invalid_params("missing handle_id", None))?;
-                let json_path = args
-                    .get("json_path")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| McpError::invalid_params("missing json_path", None))?;
-
-                validate_query_inputs(handle_id, json_path)
-                    .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
-
-                let result = engine_query(handle_id, json_path)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-                return Ok(CallToolResult::success(vec![text_content(result)]));
-            }
-
-            // ── Forward to upstream ────────────────────────────────────────────
-            let url = self.upstream_url.clone();
-            let headers = self.authed_headers().await; // refreshes token if expired
-            let id = self.next_id();
-            let threshold = self.threshold;
-            let arguments = request
+        // ── Local: query_handle ────────────────────────────────────────────
+        if tool_name == "query_handle" {
+            let args = request
                 .arguments
-                .map(serde_json::Value::Object)
-                .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+                .as_ref()
+                .ok_or_else(|| McpError::invalid_params("query_handle requires arguments", None))?;
+            let handle_id = args
+                .get("handle_id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::invalid_params("missing handle_id", None))?;
+            let json_path = args
+                .get("json_path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| McpError::invalid_params("missing json_path", None))?;
 
-            let upstream_result = tokio::task::spawn_blocking(move || {
-                upstream_call(
-                    &url,
-                    "tools/call",
-                    serde_json::json!({ "name": tool_name, "arguments": arguments }),
-                    &headers,
-                    id,
-                )
-            })
-            .await
-            .map_err(|e| McpError::internal_error(format!("spawn_blocking: {e}"), None))?
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            validate_query_inputs(handle_id, json_path)
+                .map_err(|e| McpError::invalid_params(e.to_string(), None))?;
 
-            // ── Intercept or pass through ──────────────────────────────────────
-            match intercept_if_large(upstream_result, threshold) {
-                Ok(result) => Ok(result),
-                Err(e) => Err(McpError::internal_error(e.to_string(), None)),
-            }
+            let result = engine_query(handle_id, json_path)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+            return Ok(CallToolResult::success(vec![text_content(result)]));
+        }
+
+        // ── Forward to upstream ────────────────────────────────────────────
+        let url = self.upstream_url.clone();
+        let headers = self.authed_headers().await; // refreshes token if expired
+        let id = self.next_id();
+        let threshold = self.threshold;
+        let arguments = request
+            .arguments
+            .map(serde_json::Value::Object)
+            .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+
+        let upstream_result = tokio::task::spawn_blocking(move || {
+            upstream_call(
+                &url,
+                "tools/call",
+                serde_json::json!({ "name": tool_name, "arguments": arguments }),
+                &headers,
+                id,
+            )
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("spawn_blocking: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        // ── Intercept or pass through ──────────────────────────────────────
+        match intercept_if_large(upstream_result, threshold) {
+            Ok(result) => Ok(result),
+            Err(e) => Err(McpError::internal_error(e.to_string(), None)),
         }
     }
 }
@@ -1168,10 +1212,13 @@ mod proxy_tests {
             "X-Custom: value".to_string(),
         ];
         let result = parse_proxy_headers(&raw).unwrap();
-        assert_eq!(result, vec![
-            ("Authorization".to_string(), "Bearer abc123".to_string()),
-            ("X-Custom".to_string(), "value".to_string()),
-        ]);
+        assert_eq!(
+            result,
+            vec![
+                ("Authorization".to_string(), "Bearer abc123".to_string()),
+                ("X-Custom".to_string(), "value".to_string()),
+            ]
+        );
     }
 
     #[test]
@@ -1187,12 +1234,8 @@ mod proxy_tests {
 
     #[tokio::test]
     async fn proxy_server_exposes_query_handle_in_tool_list() {
-        let server = ProxyServer::new_pending(
-            "https://example.com/mcp".to_string(),
-            vec![],
-            2048,
-            None,
-        );
+        let server =
+            ProxyServer::new_pending("https://example.com/mcp".to_string(), vec![], 2048, None);
         // Populate tools (simulates upstream handshake completing with zero upstream tools).
         server.set_upstream_tools(vec![]).await;
         let tools = server.ready_tools().await;
@@ -1201,7 +1244,8 @@ mod proxy_tests {
 
     #[test]
     fn intercept_if_large_passes_through_small_result() {
-        let result = serde_json::json!({ "content": [{"type":"text","text":"hi"}], "isError": false });
+        let result =
+            serde_json::json!({ "content": [{"type":"text","text":"hi"}], "isError": false });
         let call_result = intercept_if_large(result, 2048).unwrap();
         assert_eq!(call_result.content.len(), 1);
         let text = match &call_result.content[0].raw {
