@@ -716,7 +716,9 @@ struct ProxyServer {
     threshold: usize,
     /// Populated after upstream init; guarded so list_tools / call_tool can wait.
     upstream_tools: Arc<RwLock<Vec<Tool>>>,
-    /// Fired once when upstream_tools is populated and the proxy is ready.
+    /// Set to 1 (Release) before notify_waiters(). Durable — late callers still see 1.
+    init_complete: Arc<std::sync::atomic::AtomicUsize>,
+    /// Wakes up waiters when init completes. Not durable on its own — use with init_complete.
     init_done: Arc<Notify>,
     next_id: Arc<AtomicU64>,
     token_file: Option<std::path::PathBuf>,
@@ -736,6 +738,7 @@ impl ProxyServer {
             upstream_headers: Arc::new(upstream_headers),
             threshold,
             upstream_tools: Arc::new(RwLock::new(Vec::new())),
+            init_complete: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             init_done: Arc::new(Notify::new()),
             next_id: Arc::new(AtomicU64::new(3)),
             token_file,
@@ -745,6 +748,9 @@ impl ProxyServer {
     /// Populate upstream tools and signal readiness. Called once after OAuth + tools/list.
     async fn set_upstream_tools(&self, tools: Vec<Tool>) {
         *self.upstream_tools.write().await = tools;
+        // Store before notify so late callers see the flag even if they miss the notification.
+        self.init_complete
+            .store(1, std::sync::atomic::Ordering::Release);
         self.init_done.notify_waiters();
     }
 
@@ -754,17 +760,19 @@ impl ProxyServer {
 
     /// Wait until the upstream handshake is done, then return all tools.
     async fn ready_tools(&self) -> Vec<Tool> {
-        // Fast path: already initialised.
+        // Create the notified future BEFORE the flag check to avoid missing a notification
+        // fired between the check and the await.
+        let notified = self.init_done.notified();
+        tokio::pin!(notified);
+
+        if self
+            .init_complete
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
         {
-            let tools = self.upstream_tools.read().await;
-            if !tools.is_empty() {
-                let mut out = tools.clone();
-                out.push(query_handle_tool_def());
-                return out;
-            }
+            notified.await;
         }
-        // Slow path: wait for init (OAuth + tools/list).
-        self.init_done.notified().await;
+
         let mut tools = self.upstream_tools.read().await.clone();
         tools.push(query_handle_tool_def());
         tools
