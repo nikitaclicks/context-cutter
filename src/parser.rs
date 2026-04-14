@@ -293,9 +293,8 @@ mod tests {
     #[test]
     fn generate_teaser_from_value_for_array_payload() {
         let payload = json!([{"login": "octocat"}, {"login": "hubot"}]);
-        let teaser: serde_json::Value =
-            serde_json::from_str(&generate_teaser_from_value(&payload))
-                .expect("teaser must be valid JSON");
+        let teaser: serde_json::Value = serde_json::from_str(&generate_teaser_from_value(&payload))
+            .expect("teaser must be valid JSON");
         assert_eq!(teaser["_teaser"], json!(true));
         assert_eq!(teaser["_type"], json!("Array[2]"));
     }
@@ -303,9 +302,8 @@ mod tests {
     #[test]
     fn generate_teaser_from_value_for_scalar_payload() {
         let payload = json!(42);
-        let teaser: serde_json::Value =
-            serde_json::from_str(&generate_teaser_from_value(&payload))
-                .expect("teaser must be valid JSON");
+        let teaser: serde_json::Value = serde_json::from_str(&generate_teaser_from_value(&payload))
+            .expect("teaser must be valid JSON");
         assert_eq!(teaser["_teaser"], json!(true));
         assert_eq!(teaser["_type"], json!("int"));
     }
@@ -313,9 +311,8 @@ mod tests {
     #[test]
     fn generate_teaser_from_value_for_empty_array() {
         let payload = json!([]);
-        let teaser: serde_json::Value =
-            serde_json::from_str(&generate_teaser_from_value(&payload))
-                .expect("teaser must be valid JSON");
+        let teaser: serde_json::Value = serde_json::from_str(&generate_teaser_from_value(&payload))
+            .expect("teaser must be valid JSON");
         assert_eq!(teaser["_teaser"], json!(true));
         assert_eq!(teaser["structure"], json!("Array[0]"));
     }
@@ -337,9 +334,8 @@ mod tests {
                 }
             }
         });
-        let teaser: serde_json::Value =
-            serde_json::from_str(&generate_teaser_from_value(&payload))
-                .expect("teaser must be valid JSON");
+        let teaser: serde_json::Value = serde_json::from_str(&generate_teaser_from_value(&payload))
+            .expect("teaser must be valid JSON");
         // At depth MAX_DEPTH the list should be rendered as "Array[3]" string.
         assert_eq!(teaser["structure"]["a"]["b"]["c"], json!("Array[3]"));
     }

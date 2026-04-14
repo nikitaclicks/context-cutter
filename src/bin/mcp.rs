@@ -1054,6 +1054,7 @@ pub fn format_preview_value(val: &serde_json::Value) -> String {
 
 #[derive(Clone)]
 struct ContextCutterServer {
+    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
@@ -1210,6 +1211,7 @@ impl ServerHandler for ContextCutterServer {
 // ─── Entry point ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod proxy_tests {
     use super::*;
 
