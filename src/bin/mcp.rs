@@ -138,18 +138,22 @@ fn read_response_with_limit(
 }
 
 fn init_tracing() {
+    // IMPORTANT: MCP servers communicate over stdio — logs MUST go to stderr,
+    // never stdout. stdout is reserved for JSON-RPC protocol messages.
     let format = std::env::var("CONTEXT_CUTTER_LOG_FORMAT").unwrap_or_else(|_| "plain".to_string());
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     if format == "json" {
         tracing_subscriber::fmt()
             .json()
+            .with_writer(std::io::stderr)
             .with_env_filter(env_filter)
             .with_current_span(false)
             .with_target(false)
             .init();
     } else {
         tracing_subscriber::fmt()
+            .with_writer(std::io::stderr)
             .with_env_filter(env_filter)
             .with_target(false)
             .init();
@@ -720,9 +724,6 @@ struct ProxyServer {
     init_complete: Arc<std::sync::atomic::AtomicUsize>,
     /// Wakes up waiters when init completes. Not durable on its own — use with init_complete.
     init_done: Arc<Notify>,
-    /// The client sink, stored on first list_tools call so the background task can
-    /// push a ToolListChanged notification once upstream tools are ready.
-    client_sink: Arc<std::sync::OnceLock<rmcp::Peer<RoleServer>>>,
     next_id: Arc<AtomicU64>,
     token_file: Option<std::path::PathBuf>,
 }
@@ -743,25 +744,17 @@ impl ProxyServer {
             upstream_tools: Arc::new(RwLock::new(Vec::new())),
             init_complete: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             init_done: Arc::new(Notify::new()),
-            client_sink: Arc::new(std::sync::OnceLock::new()),
             next_id: Arc::new(AtomicU64::new(3)),
             token_file,
         }
     }
 
     /// Populate upstream tools and signal readiness. Called once after OAuth + tools/list.
-    /// Sends a ToolListChanged notification so the client refreshes its tool list.
     async fn set_upstream_tools(&self, tools: Vec<Tool>) {
         *self.upstream_tools.write().await = tools;
         self.init_complete
             .store(1, std::sync::atomic::Ordering::Release);
         self.init_done.notify_waiters();
-
-        // Push ToolListChanged so the client (Claude Code) re-fetches without waiting.
-        if let Some(sink) = self.client_sink.get() {
-            let _ = sink.notify_tool_list_changed().await;
-            info!("sent ToolListChanged notification to client");
-        }
     }
 
     fn next_id(&self) -> u64 {
@@ -786,6 +779,69 @@ impl ProxyServer {
         let mut tools = self.upstream_tools.read().await.clone();
         tools.push(query_handle_tool_def());
         tools
+    }
+
+    /// Forward a tool call to the upstream MCP.
+    /// On 401, runs the OAuth flow to get a fresh token and retries once.
+    async fn call_upstream(
+        &self,
+        url: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        threshold: usize,
+    ) -> Result<CallToolResult, ContextCutterError> {
+        let headers = self.authed_headers().await;
+        let result = self
+            .try_upstream_call(url, tool_name, arguments.clone(), &headers)
+            .await;
+
+        match result {
+            // 401 — token rejected by the server; re-run OAuth and retry once.
+            Err(ref e) if e.to_string().contains("401") => {
+                warn!("upstream returned 401, triggering OAuth re-auth");
+                if let Some(path) = &self.token_file {
+                    match run_oauth_flow(url, path).await {
+                        Ok(_) => {
+                            let fresh_headers = self.authed_headers().await;
+                            self.try_upstream_call(url, tool_name, arguments, &fresh_headers)
+                                .await
+                        }
+                        Err(oauth_err) => {
+                            error!(error = %oauth_err, "OAuth re-auth failed");
+                            result
+                        }
+                    }
+                } else {
+                    result
+                }
+            }
+            other => other,
+        }
+        .and_then(|upstream_result| intercept_if_large(upstream_result, threshold))
+    }
+
+    async fn try_upstream_call(
+        &self,
+        url: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+        headers: &[(String, String)],
+    ) -> Result<serde_json::Value, ContextCutterError> {
+        let url = url.to_string();
+        let tool_name = tool_name.to_string();
+        let headers = headers.to_vec();
+        let id = self.next_id();
+        tokio::task::spawn_blocking(move || {
+            upstream_call(
+                &url,
+                "tools/call",
+                serde_json::json!({ "name": tool_name, "arguments": arguments }),
+                &headers,
+                id,
+            )
+        })
+        .await
+        .map_err(|e| ContextCutterError::Internal(format!("spawn_blocking: {e}")))?
     }
 
     /// Build headers for an upstream call, refreshing the OAuth token if expired.
@@ -890,43 +946,31 @@ async fn upstream_handshake(
 
 impl ServerHandler for ProxyServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
-            ServerCapabilities::builder()
-                .enable_tools()
-                .enable_tool_list_changed()
-                .build(),
-        )
-        .with_instructions(
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Transparent MCP proxy with response interception. \
-             Large tool responses are stored as handles. \
-             Use query_handle(handle_id, \"$.field\") to extract specific fields.",
+                 Large tool responses are stored as handles. \
+                 Use query_handle(handle_id, \"$.field\") to extract specific fields.",
         )
     }
 
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
+        _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        // Store the client sink so the background task can push ToolListChanged later.
-        let _ = self.client_sink.set(context.peer.clone());
-
-        if self
-            .init_complete
-            .load(std::sync::atomic::Ordering::Acquire)
-            == 1
+        // Wait up to 10 s for the upstream handshake (OAuth + tools/list).
+        // Claude Code's list_tools timeout is well above 10 s so this is safe.
+        // Falls back to just [query_handle] if the handshake takes longer.
+        let tools = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.ready_tools(),
+        )
+        .await
         {
-            // Already ready — return full tool list immediately.
-            let mut tools = self.upstream_tools.read().await.clone();
-            tools.push(query_handle_tool_def());
-            Ok(ListToolsResult::with_all_items(tools))
-        } else {
-            // Not yet ready — return just query_handle now; ToolListChanged will
-            // fire once the upstream handshake (and any OAuth) completes.
-            Ok(ListToolsResult::with_all_items(vec![
-                query_handle_tool_def(),
-            ]))
-        }
+            Ok(t) => t,
+            Err(_) => vec![query_handle_tool_def()],
+        };
+        Ok(ListToolsResult::with_all_items(tools))
     }
 
     async fn call_tool(
@@ -962,32 +1006,17 @@ impl ServerHandler for ProxyServer {
 
         // ── Forward to upstream ────────────────────────────────────────────
         let url = self.upstream_url.clone();
-        let headers = self.authed_headers().await; // refreshes token if expired
-        let id = self.next_id();
         let threshold = self.threshold;
         let arguments = request
             .arguments
             .map(serde_json::Value::Object)
             .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
 
-        let upstream_result = tokio::task::spawn_blocking(move || {
-            upstream_call(
-                &url,
-                "tools/call",
-                serde_json::json!({ "name": tool_name, "arguments": arguments }),
-                &headers,
-                id,
-            )
-        })
-        .await
-        .map_err(|e| McpError::internal_error(format!("spawn_blocking: {e}"), None))?
-        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        // ── Intercept or pass through ──────────────────────────────────────
-        match intercept_if_large(upstream_result, threshold) {
-            Ok(result) => Ok(result),
-            Err(e) => Err(McpError::internal_error(e.to_string(), None)),
-        }
+        let upstream_result = self
+            .call_upstream(&url, &tool_name, arguments, threshold)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None));
+        upstream_result
     }
 }
 
@@ -1418,9 +1447,6 @@ async fn run_proxy_mode(
 
     start_background_sweeper();
 
-    // Create the server in a pending state — no upstream tools yet.
-    // This lets Claude Code complete the MCP handshake immediately while
-    // OAuth + upstream init run in the background.
     let proxy = ProxyServer::new_pending(
         upstream_url.to_string(),
         headers.clone(),
@@ -1428,7 +1454,8 @@ async fn run_proxy_mode(
         token_file.clone(),
     );
 
-    // Start serving stdio immediately so Claude Code gets an MCP response.
+    // Start serving immediately so Claude Code gets an initialize response right away.
+    // list_tools will block (up to 10 s) until the background handshake completes.
     let server = match proxy.clone().serve(stdio()).await {
         Ok(s) => s,
         Err(e) => {
@@ -1438,8 +1465,8 @@ async fn run_proxy_mode(
         }
     };
 
-    // Run OAuth + upstream handshake concurrently.
-    // list_tools / call_tool will wait on init_done before proceeding.
+    // Run OAuth + upstream handshake in background.
+    // list_tools blocks on init_done until this completes (10 s timeout).
     let proxy_bg = proxy.clone();
     let url_bg = upstream_url.to_string();
     let hdrs_bg = headers.clone();
@@ -1452,8 +1479,6 @@ async fn run_proxy_mode(
             }
             Err(e) => {
                 error!(error = %e, "upstream handshake failed");
-                eprintln!("context-cutter-mcp: upstream handshake failed: {e}");
-                // Notify anyway so list_tools unblocks (returns empty tools).
                 proxy_bg.set_upstream_tools(vec![]).await;
             }
         }
