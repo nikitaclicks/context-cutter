@@ -23,6 +23,7 @@ testpaths = ["tests"]
 addopts = "-q --strict-markers"
 markers = [
 	"benchmark: performance benchmark tests",
+	"integration: tests that require the compiled binary",
 	"ai_e2e_offline: deterministic, provider-agnostic AI-integrated end-to-end tests",
 	"ai_e2e_live: optional live provider smoke tests requiring network and API keys",
 ]

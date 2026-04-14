@@ -115,6 +115,111 @@ Runs a JSONPath expression against a previously stored payload.
 
 Handle IDs are deterministic (SHA-256 of canonicalized JSON) — the same payload always produces the same `hdl_<12hex>`, making repeated fetches idempotent.
 
+## Proxy mode
+
+The fetch-and-query pattern above requires the agent to explicitly call `fetch_json_cutted`. If you're using an existing MCP server — such as a ClickUp, GitHub, or Notion integration — its tools return large payloads directly, and there's no interception point.
+
+**Proxy mode** wraps any HTTP MCP server: ContextCutter sits between your agent and the upstream MCP, transparently forwarding tool calls and intercepting large responses before they reach the context window.
+
+```
+┌─────────┐   tools/call (any tool)   ┌──────────────────┐   tools/call   ┌──────────────┐
+│  Agent  │ ────────────────────────► │  ContextCutter   │ ─────────────► │  Upstream    │
+│  (LLM)  │                           │  (proxy mode)    │ ◄──────────── │  MCP server  │
+│         │ ◄──────────────────────── │                  │   full payload └──────────────┘
+│         │  { handle_id, preview }   │  intercept if    │
+│         │                           │  ≥ threshold     │
+│         │   query_handle(id, path)  │                  │
+│         │ ────────────────────────► │                  │
+│         │ ◄──────────────────────── │                  │
+└─────────┘   "$.field"               └──────────────────┘
+```
+
+### Setup
+
+Replace the upstream MCP entry in your config with `context-cutter-mcp --proxy <url>`:
+
+**Claude Desktop** (or any `claude_desktop_config.json`-style client):
+
+```json
+{
+  "mcpServers": {
+    "clickup": {
+      "command": "npx",
+      "args": ["-y", "context-cutter-mcp", "--proxy", "https://mcp.clickup.com/mcp"]
+    }
+  }
+}
+```
+
+**With auth headers** (repeat `--proxy-header` for multiple headers):
+
+```json
+{
+  "mcpServers": {
+    "clickup": {
+      "command": "npx",
+      "args": [
+        "-y", "context-cutter-mcp",
+        "--proxy", "https://mcp.clickup.com/mcp",
+        "--proxy-header", "Authorization: Bearer $TOKEN"
+      ]
+    }
+  }
+}
+```
+
+The agent sees all the upstream tools exactly as before, plus `query_handle` is automatically added.
+
+### What the agent sees for large responses
+
+Instead of a raw JSON dump, the agent receives a compact preview:
+
+```
+[context-cutter] Response stored (18.3 KB → handle: hdl_a1b2c3d4e5f6)
+
+Preview:
+  id: "86cxyz123"
+  name: "Fix login bug in staging"
+  status: "in progress"
+  assignees: Array[2]
+  description: "Steps to reproduce..." (truncated)
+  custom_fields: Array[8]
+  date_created: "1712345678000"
+
+Call query_handle("hdl_a1b2c3d4e5f6", "$.field") to extract specific fields.
+```
+
+Small responses (below `--proxy-threshold`, default 2 KB) pass through unchanged.
+
+### Authentication
+
+For MCPs that require OAuth (e.g. ClickUp), authenticate once through your MCP client's normal auth flow. The token is saved to a file (Claude Code saves to `~/.claude/<server-name>-token`). Point the proxy at that file with `--proxy-token-file` and it handles the rest automatically:
+
+- If the token is valid → used silently
+- If the token is missing or expired → browser opens automatically for re-authentication (OAuth 2.0 + PKCE), token saved, proxy continues
+
+```json
+{
+  "clickup": {
+    "command": "npx",
+    "args": [
+      "-y", "context-cutter-mcp",
+      "--proxy", "https://mcp.clickup.com/mcp",
+      "--proxy-token-file", "~/.claude/clickup-token"
+    ]
+  }
+}
+```
+
+### CLI flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `--proxy <url>` | — | Upstream HTTP MCP URL to proxy |
+| `--proxy-threshold <bytes>` | `2048` | Responses ≥ this size are intercepted |
+| `--proxy-header <Key: Value>` | — | Extra header forwarded to upstream (repeatable) |
+| `--proxy-token-file <path>` | — | Path to Bearer token file; re-read on every request so token refreshes are automatic. Supports `~` expansion. |
+
 ## Install
 
 ### Binary (recommended for production)
@@ -202,6 +307,8 @@ Environment variables for the MCP server:
 | `CONTEXT_CUTTER_MAX_PAYLOAD_BYTES`| `10485760` | Max accepted response size (10 MB)        |
 | `CONTEXT_CUTTER_LOG_FORMAT`       | `plain`    | `plain` or `json` structured logs         |
 | `RUST_LOG`                        | `info`     | Tracing filter (e.g. `debug`, `trace`)    |
+
+Proxy mode CLI flags are documented in [Proxy mode → CLI flags](#cli-flags) above.
 
 ## Security
 
