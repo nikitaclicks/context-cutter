@@ -15,3 +15,6 @@ build/
 *.pyd
 *.dylib
 *.dSYM/
+.coverage
+coverage.xml
+htmlcov/
