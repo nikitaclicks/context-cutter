@@ -115,7 +115,7 @@ jobs:
         run: pytest -m "not ai_e2e_offline and not ai_e2e_live" --cov=python/context_cutter --cov-report=xml
 
       - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v6
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: ./rust.lcov,./coverage.xml
